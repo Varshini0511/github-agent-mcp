@@ -19,15 +19,32 @@ import uuid
 import streamlit as st
 
 # On Streamlit Community Cloud there is no .env file -- secrets come from the
-# app's dashboard and are exposed via st.secrets. Bridge them into the
-# environment BEFORE config is read, so get_settings() (pydantic-settings)
-# and the MCP subprocess it spawns both pick them up. setdefault keeps a
-# local .env authoritative when running on your own machine.
+# app's dashboard and are exposed via st.secrets. Two things need them:
+#   1. this process (config.get_settings) -> bridge into os.environ
+#   2. the MCP server, which runs as a CHILD process that the MCP stdio
+#      client spawns with a minimal environment (it does NOT inherit our
+#      os.environ). Locally that child reads the .env file directly; on the
+#      cloud there is none, so we write one from the secrets so the child
+#      can load the keys the same way. (A local .env is never overwritten.)
 try:
-    for _k, _v in st.secrets.items():
-        os.environ.setdefault(_k, str(_v))
+    _secrets = dict(st.secrets)
 except Exception:
-    pass  # no secrets.toml locally -> fall back to .env
+    _secrets = {}  # no secrets.toml locally -> fall back to the real .env
+
+if _secrets:
+    for _k, _v in _secrets.items():
+        os.environ.setdefault(_k, str(_v))
+    from pathlib import Path as _Path
+
+    _envf = _Path(__file__).with_name(".env")
+    if not _envf.exists():
+        try:
+            _envf.write_text(
+                "\n".join(f"{k}={v}" for k, v in _secrets.items()),
+                encoding="utf-8",
+            )
+        except Exception:
+            pass
 
 from agent_core import build_agent, resume, send
 from config import get_settings

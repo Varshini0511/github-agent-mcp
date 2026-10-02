@@ -16,16 +16,18 @@ Usage
 
 import logging
 from functools import lru_cache
+from pathlib import Path
 
 from dotenv import load_dotenv
 from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-# Load .env into os.environ once, at import time. This is for the benefit
-# of THIRD-PARTY libraries (langchain, the groq/google SDKs) that read
-# their keys straight from the environment. Our own code should read the
-# validated `Settings` object below instead.
-load_dotenv()
+# Load .env into os.environ once, at import time, for the benefit of
+# THIRD-PARTY libraries (langchain, the groq/google SDKs) that read their
+# keys straight from the environment. Resolve it by ABSOLUTE path next to
+# this file, not via the working directory: the MCP server runs as a child
+# process whose cwd may differ, and it must still find the same .env.
+load_dotenv(Path(__file__).with_name(".env"))
 
 
 class Settings(BaseSettings):
