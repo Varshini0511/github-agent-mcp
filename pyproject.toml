@@ -1,0 +1,62 @@
+[project]
+name = "github-agent"
+version = "0.1.0"
+description = "A multi-agent GitHub assistant built on an MCP server"
+readme = "README.md"
+requires-python = ">=3.11"
+
+# Runtime dependencies. Lower bounds only: enough to guarantee the APIs
+# we use exist, without freezing patch versions (a lock file's job).
+dependencies = [
+    "fastmcp>=4.0.3",
+    "requests>=2.32",
+    "python-dotenv>=1.0",
+    "pydantic>=2.11",
+    "pydantic-settings>=2.6",
+    "tenacity>=9.0",
+    "langchain>=1.0",
+    "langchain-groq>=1.0",
+    "langchain-mcp-adapters>=0.3",
+    "langgraph>=1.0",
+    "langgraph-checkpoint-sqlite>=2.0",
+]
+
+[project.optional-dependencies]
+# Installed with:  pip install -e ".[dev]"
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.24",
+    "responses>=0.25",   # mock the requests library in tests
+    "pyyaml>=6.0",       # golden eval cases (evals/cases.yaml)
+]
+# Streamlit UI. Installed with:  pip install -e ".[ui]"
+ui = [
+    "streamlit>=1.38",
+]
+# Block B (RAG). Installed with:  pip install -e ".[rag]"
+# FAISS over Chroma: far lighter to install (no onnxruntime / grpc),
+# persists as two small files per index, no background server.
+rag = [
+    "langchain-google-genai>=2.0",
+    "langchain-community>=0.3",
+    "langchain-text-splitters>=0.3",
+    "faiss-cpu>=1.9",
+]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+# Flat layout: our code is loose .py modules, not a package directory.
+py-modules = [
+    "config", "github_client", "rag", "server",
+    "agent_core", "multi_agent", "agent", "chat", "demo",
+    "runner", "streamlit_app",
+]
+# The evaluation harness IS a package (evals/), unlike the flat modules.
+packages = ["evals"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]

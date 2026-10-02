@@ -1,0 +1,11 @@
+# The app holds a live background thread (runner.py) and an MCP
+# subprocess per browser session. Streamlit's default file watcher
+# (watchdog) picks up the .pyc files Python writes to __pycache__/ while
+# importing our modules and treats them as a source change, triggering an
+# automatic rerun mid-startup -- which races with the background thread
+# setup. Not needed for a demo app, so it's off.
+[server]
+fileWatcherType = "none"
+
+[browser]
+gatherUsageStats = false

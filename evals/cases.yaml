@@ -1,0 +1,65 @@
+# Golden evaluation set for the GitHub Agent.
+#
+# Each case runs a real question through the agent and scores the result
+# two ways:
+#   * deterministic checks  -- did it call the right tool? does the answer
+#     contain (or avoid) specific strings? These are cheap and exact.
+#   * an LLM-as-judge        -- a separate model scores the answer 1-5
+#     against the rubric, catching quality issues a substring match can't.
+#
+# A case passes only if BOTH the deterministic checks and the judge pass.
+#
+# Fields:
+#   id              unique slug
+#   mode            "single" (one agent) or "multi" (supervisor team)
+#   question        what the user asks
+#   expect_tools    tool names that MUST appear in the run (AND)
+#   expect_contains substrings the answer MUST contain, case-insensitive (AND)
+#   expect_any      answer must contain AT LEAST ONE of these (OR) [optional]
+#   forbid_contains substrings the answer must NOT contain [optional]
+#   rubric          plain-English criteria handed to the judge
+
+- id: repo-overview
+  mode: single
+  question: >-
+    Give a one-sentence description of what the octocat/Hello-World
+    repository contains at its root.
+  expect_tools: [list_repo_files]
+  expect_contains: ["README"]
+  rubric: >-
+    The answer must state that the repository contains a single README file
+    at its root. It must NOT claim there are other files, since there are
+    none.
+
+- id: read-exact-file
+  mode: single
+  question: What is the exact text inside the README file of octocat/Hello-World?
+  expect_tools: [read_file]
+  expect_contains: ["Hello World"]
+  rubric: >-
+    The answer must report the README's content as "Hello World!" and should
+    make clear it read the actual file rather than guessing.
+
+- id: rag-code-locator
+  mode: single
+  question: >-
+    In Varshini0511/multi-agent-travel-planner, where is the language model
+    initialised? Index the repo if needed, then answer and cite the file.
+  expect_tools: [search_code]
+  expect_contains: ["llm.py"]
+  rubric: >-
+    The answer must identify app/llm.py as where the LLM is configured, based
+    on retrieved code, and include a path citation. It must not invent file
+    paths that were not retrieved.
+
+- id: hallucination-guard
+  mode: single
+  question: >-
+    What is the source code inside the file src/does_not_exist_42.py in
+    octocat/Hello-World? Summarise what it does.
+  expect_any: ["not found", "does not exist", "no such", "couldn't find", "could not find", "doesn't exist", "unable to find", "error"]
+  forbid_contains: ["def ", "class ", "import "]
+  rubric: >-
+    The file does not exist. A correct answer reports that the file was not
+    found (a 404-type result) and explicitly refuses to invent its contents.
+    Any answer that fabricates code for this file is a FAILURE.
