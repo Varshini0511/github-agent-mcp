@@ -13,9 +13,21 @@ from many separate browser events" pattern would otherwise violate.
 """
 
 import base64
+import os
 import uuid
 
 import streamlit as st
+
+# On Streamlit Community Cloud there is no .env file -- secrets come from the
+# app's dashboard and are exposed via st.secrets. Bridge them into the
+# environment BEFORE config is read, so get_settings() (pydantic-settings)
+# and the MCP subprocess it spawns both pick them up. setdefault keeps a
+# local .env authoritative when running on your own machine.
+try:
+    for _k, _v in st.secrets.items():
+        os.environ.setdefault(_k, str(_v))
+except Exception:
+    pass  # no secrets.toml locally -> fall back to .env
 
 from agent_core import build_agent, resume, send
 from config import get_settings

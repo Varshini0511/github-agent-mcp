@@ -1,6 +1,27 @@
-streamlit>=1.38
-folium>=0.17
-streamlit-folium>=0.22
-playwright>=1.45
+# Runtime dependencies for deploying the GitHub Agent (Streamlit Cloud).
+# Mirrors pyproject.toml's runtime + ui + rag groups.
+
+# Core agent + MCP
+fastmcp>=4.0.3
+requests>=2.32
 python-dotenv>=1.0
-groq>=1.0
+pydantic>=2.11
+pydantic-settings>=2.6
+tenacity>=9.0
+
+# LangChain / LangGraph
+langchain>=1.0
+langchain-groq>=1.0
+langchain-google-genai>=2.0
+langchain-community>=0.3
+langchain-text-splitters>=0.3
+langchain-mcp-adapters>=0.3
+langgraph>=1.0
+langgraph-checkpoint-sqlite>=2.0
+
+# RAG
+faiss-cpu>=1.9
+pyyaml>=6.0
+
+# UI
+streamlit>=1.38
