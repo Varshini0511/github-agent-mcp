@@ -1,149 +1,177 @@
 # GitHub Agent
 
-A multi-agent GitHub assistant built on a [Model Context Protocol](https://modelcontextprotocol.io)
-server. An MCP server exposes GitHub operations as tools; LangGraph agents
-consume them to answer questions about repositories, search code semantically,
-triage issues, and open pull requests — with a human approval gate on every
-write.
+[![CI](https://github.com/Varshini0511/github-agent-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/Varshini0511/github-agent-mcp/actions/workflows/ci.yml)
+![python](https://img.shields.io/badge/python-3.11%20%7C%203.12-blue)
+![style](https://img.shields.io/badge/lint-ruff-informational)
 
-Built as a learning / portfolio project to exercise a spread of applied-AI
-concepts end to end.
+A GitHub assistant built the way you would build one for production: an
+**MCP tool server**, a **LangGraph agent** (single or supervisor + specialists),
+**hybrid RAG** over repositories, **approval-gated writes**, **guardrails**,
+**usage metering**, **evals**, and both a **web UI** and an **HTTP/SSE API**.
 
-## What it demonstrates
+> It explains codebases with `path:line` citations, triages issues, and opens
+> pull requests — and it is designed so that a hostile README, a pasted token,
+> a rate-limited model or a confused loop can't turn into a bad write.
 
-| Area | Concept | Where |
+📐 [Architecture](ARCHITECTURE.md) · 🛡️ [Security model](SECURITY.md) · 🧠 [Concepts index](LEARNINGS.md)
+
+## What's inside
+
+| Capability | How it works | Code |
 |---|---|---|
-| Protocol | MCP server exposing 12 tools over stdio | `server.py` |
-| Architecture | Separation of concerns: HTTP client vs tools vs agent wiring | `github_client.py` / `server.py` / `agent_core.py` |
-| Resilience | Retry + exponential backoff + jitter, rate-limit handling, LLM-readable errors | `github_client.py` |
-| Config | Validated, fail-fast settings; secrets masked | `config.py` |
-| Memory | Per-conversation state via a SQLite checkpointer (`thread_id`) | `agent_core.py` |
-| Context control | Summarization middleware keeps the window bounded | `agent_core.py` |
-| Safety | Model-call limit, model-retry on bad tool calls | `agent_core.py` |
-| RAG | Repo tarball → chunk → Gemini embeddings → FAISS → cited retrieval | `rag.py` |
-| Human-in-the-loop | Graph interrupts before any state-changing GitHub call | `agent_core.py` / `chat.py` |
-| Multi-agent | Supervisor delegates to `repo_qa` / `issue_triage` / `code_writer` specialists ("agent as tool") | `multi_agent.py` |
-| Testing | 16 offline tests mocking the GitHub API at the HTTP boundary | `tests/` |
-| Evaluation | Golden dataset + deterministic checks + LLM-as-judge, gated in CI; explicitly tests the hallucination failure mode | `evals/` |
-| UI | Streamlit chat app; async agent bridged to Streamlit's sync/rerun model via a dedicated background-thread event loop and a queue-fed long-lived task | `streamlit_app.py` / `runner.py` |
+| **MCP server** | 14 GitHub tools over stdio, reusable by any MCP client | `server.py` |
+| **Agent loop** | LangGraph model ⇄ tools; any chat model via one `CHAT_MODEL` string | `agent_core.py` |
+| **Multi-agent** | Supervisor routes to `repo_qa` / `issue_triage` / `code_writer` (scoped tools, own prompts) | `multi_agent.py` |
+| **Hybrid RAG** | Chunk → embed → FAISS **+ BM25**, fused with Reciprocal Rank Fusion; identifier-aware weighting | `rag.py`, `retrieval.py` |
+| **Human-in-the-loop** | Writes freeze the graph at an `interrupt()`; approve/reject resumes it | `HumanInTheLoopMiddleware` |
+| **Guardrails** | Secret/PII redaction both ways; prompt-injection quarantine of tool output | `guardrails.py` |
+| **Memory** | Per-conversation (checkpointer) **and** cross-conversation (`remember`/`recall`) | `memory.py` |
+| **Self-reflection** | Optional critic fact-checks answers against tool output, one bounded revision | `reflection.py` |
+| **Observability** | Tokens, model/tool calls, latency, est. cost per turn; JSON log lines; optional LangSmith | `observability.py` |
+| **Streaming** | Token + tool-activity events in the UI and over SSE | `agent_core.stream_turn` |
+| **Reliability** | Backoff + jitter, rate-limit awareness, corrective retries, bounded loops | `github_client.py`, `agent_core.py` |
+| **Evals** | Golden set, deterministic checks + LLM-as-judge, hallucination guard | `evals/` |
+| **Tests** | 100+ offline tests, including the *real* agent graph against a scripted fake model | `tests/` |
 
-## Architecture
-
-```mermaid
-flowchart TD
-    U[User] --> D{driver}
-    D -->|chat.py| A[single agent]
-    D -->|chat.py --multi| S[supervisor]
-    S --> QA[repo_qa]
-    S --> TR[issue_triage]
-    S --> WR[code_writer]
-    A & QA & TR & WR --> MCP[MCP server\nserver.py]
-    MCP --> GC[github_client.py\nretry / backoff / errors]
-    MCP --> RAG[rag.py\nFAISS + Gemini]
-    GC --> GH[(GitHub REST API)]
-    RAG --> GH
-    A --- MEM[(SQLite checkpointer\nper-thread memory)]
-    S --- MEM
-```
-
-## Tools on the MCP server
-
-Read: `list_repo_files`, `read_file`, `list_issues`, `get_issue`,
-`index_repo`, `search_code`
-Write (gated): `create_issue`, `comment_on_issue`, `add_labels`,
-`create_branch`, `write_file`, `open_pull_request`
-
-## Setup
+## Quick start
 
 ```bash
-python -m venv venv
-venv\Scripts\activate                 # Windows
-pip install -e ".[dev,rag,ui]"
+git clone https://github.com/Varshini0511/github-agent-mcp && cd github-agent-mcp
+python -m venv venv && venv\Scripts\activate          # macOS/Linux: source venv/bin/activate
+pip install -e ".[dev,rag,ui,api]"
 
-copy .env.example .env                 # then fill in tokens
+cp .env.example .env     # then set GITHUB_TOKEN and a model key (GOOGLE_API_KEY or GROQ_API_KEY)
+streamlit run streamlit_app.py
 ```
 
-`.env` needs `GITHUB_TOKEN` and `GROQ_API_KEY`; `GOOGLE_API_KEY` is required
-for the RAG tools (Gemini embeddings). Writes are **off** by default — set
-`ALLOW_WRITES=true` with a write-scoped token to enable them.
+Writes are **off** by default. See [Configuration](#configuration) to enable them.
 
-## Run
+### Other ways to run it
 
 ```bash
-streamlit run streamlit_app.py         # web UI (chat + approval buttons)
-python testClient.py                   # call the MCP server directly
-python agent.py "question"             # one-shot, no memory
-python chat.py                         # interactive, per-thread memory
-python chat.py <thread_id>             # resume an earlier conversation
-python chat.py --multi                 # supervisor + specialist team
-python demo.py --list                  # scripted scenario tour
-pytest -q                              # offline test suite
+python chat.py                 # terminal chat (add --multi for the supervisor team)
+python agent.py "question"     # one-shot
+uvicorn api:app --port 8000    # HTTP + SSE API  ->  http://localhost:8000/docs
+docker compose up --build      # UI on :8501, API on :8000
 ```
 
-## Build log
-
-- [x] Stage 1 — minimal MCP server
-- [x] Stage 2 — ReAct agent wired to the server
-- [x] Block A — hardened client, validated config, conversational memory
-- [x] Block B — RAG over a repository (`index_repo`, `search_code`)
-- [x] Block C — write tools + human-in-the-loop approval
-- [x] Block D — multi-agent supervisor
-- [x] Block E — demo CLI + docs
-- [x] Streamlit UI — chat interface with in-browser approval buttons
-- [x] Evaluation harness — golden set + LLM-as-judge + hallucination guard
-
-## Evaluation
-
-Beyond the offline unit tests (which prove the *plumbing* works), the
-agent's *answers* are measured against a golden set in `evals/`:
+### HTTP API
 
 ```bash
-python evals/run.py            # run every case, print a scored report
-python evals/run.py --list     # list case ids
-python evals/run.py rag-code-locator   # run one case
-RUN_EVALS=1 pytest tests/test_evals.py # same, as a CI gate
+# one turn
+curl -s localhost:8000/chat -H 'content-type: application/json' \
+  -d '{"message": "What does Varshini0511/expense-tracker do?"}'
+
+# streaming (Server-Sent Events: thread, tool_start, tool_end, token, final | interrupt)
+curl -N localhost:8000/chat/stream -H 'content-type: application/json' \
+  -d '{"message": "Where is CORS configured in Varshini0511/expense-tracker?"}'
+
+# a write pauses with {"type": "interrupt", ...}; approve it explicitly
+curl -s localhost:8000/resume -H 'content-type: application/json' \
+  -d '{"thread_id": "<id from /chat>", "decisions": [{"type": "approve"}]}'
 ```
 
-Each case (`evals/cases.yaml`) is scored two ways, and passes only if
-**both** agree:
+An API call alone can never mutate a repository: it needs `ALLOW_WRITES=true`
+**and** a separate `/resume` approval. Set `API_KEY` and send `X-API-Key`;
+without a key only loopback clients are accepted.
 
-- **Deterministic checks** — did it call the expected tool? does the
-  answer contain (or crucially, *avoid*) specific strings? Cheap, exact.
-- **LLM-as-judge** (`evals/judge.py`) — a separate model scores the
-  answer 1–5 against a plain-English rubric, catching quality problems a
-  substring match can't.
+## Configuration
 
-The set deliberately includes a **hallucination guard**: it asks for the
-contents of a file that doesn't exist and *fails* the agent if it invents
-any code instead of reporting "not found". Testing the failure mode
-matters as much as testing the happy path.
+| Variable | Default | Purpose |
+|---|---|---|
+| `GITHUB_TOKEN` | — *(required)* | Fine-grained PAT. Read-only is enough to explore. |
+| `CHAT_MODEL` | `groq:openai/gpt-oss-120b` | Any `provider:model` LangChain understands (e.g. `google_genai:gemini-flash-lite-latest`) |
+| `GOOGLE_API_KEY` / `GROQ_API_KEY` | — | Key for the chosen provider / embeddings |
+| `ALLOW_WRITES` | `false` | Master switch for every write tool |
+| `GUARDRAILS_REDACT_PII` | `true` | Redact emails / phones / cards in tool output and answers |
+| `ENABLE_REFLECTION` | `false` | Fact-check each answer; costs one extra model call |
+| `RAG_HYBRID` | `true` | BM25 + dense fusion (set `false` for dense only) |
+| `AGENT_RUN_LIMIT` | `25` | Max model calls per turn |
+| `API_KEY` | — | Required `X-API-Key` for the HTTP API |
+| `MODEL_PRICES_JSON` | — | Override the cost estimator, e.g. `{"gemini":[0.3,2.5]}` |
 
-`python evals/run.py` exits non-zero if any case fails, so it doubles as
-a CI quality gate.
+Full list with comments: [`.env.example`](.env.example).
 
-## Engineering note: bridging async agents into Streamlit
+**Enabling writes safely:** create a fine-grained PAT scoped to specific
+repositories with *Contents*, *Pull requests* and *Issues* set to
+read & write, then set `ALLOW_WRITES=true`. Every write still pauses for approval.
 
-Streamlit reruns the whole script on every click and offers no async
-support natively, but the agent's dependencies (an MCP subprocess over
-stdio, an async SQLite checkpointer) both require the *same* asyncio task
-to stay running for as long as they're used -- exactly how the CLI uses
-them (`async with build_agent() as agent:` wrapping a whole multi-turn
-session). A naive bridge that opens the agent in one `run_coroutine_threadsafe`
-call and uses it in later, separate calls breaks silently: the SQLite
-connection's worker thread gets torn down by Python's async-generator
-finalizer once nothing references the context manager anymore, and the
-MCP client's background reader dies once its opening task completes.
-`runner.py`'s `AgentWorker` fixes this by holding the entire session
-(construction + every message) inside **one** long-lived task, fed
-through a queue -- callers from any thread submit work and block on a
-`concurrent.futures.Future` for the result.
+## Tools
 
-## Known limitations
+| Group | Tools |
+|---|---|
+| Read | `list_repo_files`, `read_file`, `read_file_lines`, `list_issues`, `get_issue` |
+| RAG | `index_repo`, `search_code` |
+| Write 🔒 | `create_issue`, `comment_on_issue`, `add_labels`, `create_branch`, `write_file`, `edit_file`, `open_pull_request` |
+| Agent-local | `write_todos` (progress checklist), `remember`, `recall` (long-term memory) |
 
-- Groq's free tier is rate-limited (TPM/RPM); the multi-agent path makes
-  several model calls per turn and can hit `429`s. `ModelRetryMiddleware`
-  and the Groq SDK's own backoff absorb most of them.
-- The FAISS index is local and per-repo under `vector_store/`; there is no
-  incremental re-indexing yet.
-- Long-term (cross-thread) memory via a LangGraph `Store` is scaffolded but
-  not implemented.
+🔒 = needs `ALLOW_WRITES=true` **and** human approval. There is intentionally
+no tool to merge, delete, force-push or change repository settings.
+
+## Observability
+
+Every turn reports model calls, tokens, tool calls, latency and an estimated
+cost (the UI sidebar, `usage` in API responses, and one JSON log line per turn):
+
+```json
+{"event": "turn", "thread_id": "api-3f9c…", "model_calls": 4, "input_tokens": 5120,
+ "output_tokens": 640, "tool_calls": 3, "tools": ["read_file_lines", "search_code"],
+ "latency_s": 6.82, "cost_usd": 0.0027}
+```
+
+For full traces, set `LANGSMITH_TRACING=true` and `LANGSMITH_API_KEY` — no code change.
+Costs are **estimates at list price**; on a free tier the real bill is $0.
+
+## Testing
+
+```bash
+pytest -q                          # offline: no network, no keys   (~10 s)
+ruff check . && ruff format --check .
+
+python evals/run.py                # LIVE: scored golden set (uses API quota)
+python evals/run.py hallucination-guard
+```
+
+The offline suite is the interesting part: `tests/fakes.py` provides a
+scripted chat model so the **real** LangGraph agent — tool loop, approval
+interrupts, guardrails, streaming, usage metering, memory, reflection and the
+supervisor — runs deterministically in CI. The live evals measure answer
+quality, including a case that *fails* the agent if it invents code for a file
+that does not exist.
+
+## Project layout
+
+```
+server.py            MCP tool server (separate process)
+github_client.py     resilient GitHub REST client
+rag.py retrieval.py  index + hybrid search (BM25, RRF)
+agent_core.py        agent assembly, send / resume / stream_turn, guard middleware
+multi_agent.py       supervisor + specialists
+guardrails.py        redaction + injection defence (pure functions)
+observability.py     usage / cost / structured metrics
+memory.py reflection.py
+runner.py            sync ↔ async bridge (AsyncRunner, AgentWorker)
+api.py               FastAPI + SSE        streamlit_app.py   web UI
+evals/               golden set + LLM judge
+tests/               offline suite (fake model drives the real graph)
+```
+
+## Deploying
+
+* **Container:** `docker build -t github-agent .` (non-root, health-checked) or
+  `docker compose up --build`.
+* **Streamlit Community Cloud:** add the variables above as app *Secrets*; the
+  app writes them to a `.env` for the MCP subprocess. Keep `ALLOW_WRITES=false`
+  on any public instance — one token serves every visitor.
+
+## Honest limitations
+
+* Injection and PII detection are heuristics — approval + least-privilege are the real backstops ([SECURITY.md](SECURITY.md)).
+* BM25 is rebuilt per query (fine for ~10⁵ chunks); a persistent inverted index is the next step.
+* SQLite state and the in-process rate limiter are single-node; production would use Postgres + a gateway.
+* Small free-tier models loop or mis-plan on large multi-file changes; a stronger model is a one-line `CHAT_MODEL` change.
+* No incremental re-indexing; `index_repo` rebuilds the repo's index.
+
+## License
+
+No license has been chosen yet — add a `LICENSE` file before accepting contributions.
