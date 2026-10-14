@@ -1,0 +1,19 @@
+# One command to run everything:   docker compose up --build
+#   UI  -> http://localhost:8501
+#   API -> http://localhost:8000/docs
+services:
+  ui:
+    build: .
+    env_file: .env
+    ports: ["8501:8501"]
+    volumes: ["agent-data:/data"]
+
+  api:
+    build: .
+    env_file: .env
+    command: ["uvicorn", "api:app", "--host", "0.0.0.0", "--port", "8000"]
+    ports: ["8000:8000"]
+    volumes: ["agent-data:/data"]
+
+volumes:
+  agent-data:

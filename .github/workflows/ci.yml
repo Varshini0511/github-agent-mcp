@@ -1,0 +1,66 @@
+name: CI
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+  workflow_dispatch:
+
+# Cancel superseded runs on the same ref so pushes don't queue up.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    name: Lint & format (ruff)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install "ruff>=0.6"
+      - run: ruff check .
+      - run: ruff format --check .
+
+  test:
+    name: Offline tests (pytest)
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+      - name: Install
+        run: pip install -e ".[dev,api]"
+      - name: Run offline test suite
+        # Dummy values: settings are validated at construction (fail-fast),
+        # but every test mocks the network, so nothing real is ever called.
+        env:
+          GITHUB_TOKEN: ci-dummy-token
+          GROQ_API_KEY: ci-dummy-key
+        run: pytest -q
+
+  # Live evals hit real APIs and cost quota, so they are opt-in:
+  # run manually via "Run workflow" with the secrets configured.
+  evals:
+    name: Live evals (manual)
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install -e ".[dev,rag]"
+      - env:
+          GITHUB_TOKEN: ${{ secrets.GH_AGENT_TOKEN }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
+          CHAT_MODEL: google_genai:gemini-flash-lite-latest
+        run: python evals/run.py
