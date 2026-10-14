@@ -55,9 +55,7 @@ class Settings(BaseSettings):
 
     # --- Model choices -------------------------------------------------
     chat_model: str = Field("groq:openai/gpt-oss-120b", alias="CHAT_MODEL")
-    embedding_model: str = Field(
-        "models/gemini-embedding-001", alias="EMBEDDING_MODEL"
-    )
+    embedding_model: str = Field("models/gemini-embedding-001", alias="EMBEDDING_MODEL")
 
     # --- Write safety (Block C) ------------------------------------
     # When False (the default) the write tools refuse and explain how to
@@ -84,6 +82,10 @@ class Settings(BaseSettings):
     # SQLite file where the agent persists conversation state, keyed by
     # thread_id. Survives process restarts (unlike an in-memory saver).
     checkpoint_db: str = Field("agent_memory.sqlite", alias="CHECKPOINT_DB")
+    # LONG-term memory: durable facts about the user, shared across every
+    # conversation (see memory.py). A separate file from the checkpointer so
+    # clearing chat history never wipes learned preferences.
+    memory_db: str = Field("agent_longterm.sqlite", alias="MEMORY_DB")
 
     # --- RAG (Block B) ------------------------------------------------
     # Directory holding one FAISS index per indexed repository.
@@ -93,8 +95,31 @@ class Settings(BaseSettings):
     rag_max_chunks: int = Field(3000, alias="RAG_MAX_CHUNKS")
     rag_max_file_bytes: int = Field(200_000, alias="RAG_MAX_FILE_BYTES")
 
+    # --- Guardrails & reflection ---------------------------------------
+    # Secrets are ALWAYS redacted. PII (emails, phones, cards) redaction is
+    # on by default for safety; turn it off if you need the agent to quote
+    # contact details from a repo.
+    guardrails_redact_pii: bool = Field(True, alias="GUARDRAILS_REDACT_PII")
+    # Self-critique pass: a second model call fact-checks each answer against
+    # the tool output and allows one revision. Costs extra calls -> opt-in.
+    enable_reflection: bool = Field(False, alias="ENABLE_REFLECTION")
+
+    # --- Retrieval --------------------------------------------------------
+    # Hybrid search = BM25 (exact terms) + vector (meaning), fused with RRF.
+    rag_hybrid: bool = Field(True, alias="RAG_HYBRID")
+    rag_candidates: int = Field(20, alias="RAG_CANDIDATES")
+
+    # --- HTTP API (api.py) -------------------------------------------------
+    # If set, every request must send this in the X-API-Key header. If unset,
+    # the API only accepts loopback clients (local development).
+    api_key: SecretStr | None = Field(None, alias="API_KEY")
+    api_rate_limit_per_min: int = Field(30, alias="API_RATE_LIMIT_PER_MIN")
+
     # --- Observability ----------------------------------------------
     log_level: str = Field("INFO", alias="LOG_LEVEL")
+    # Optional JSON overrides for the cost estimator, USD per 1M tokens:
+    #   {"gemini": [0.30, 2.50], "my-model": [1.0, 3.0]}
+    model_prices_json: str = Field("", alias="MODEL_PRICES_JSON")
 
     # Convenience: ready-to-use GitHub REST headers.
     @property

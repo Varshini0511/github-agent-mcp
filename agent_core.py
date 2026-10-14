@@ -30,14 +30,25 @@ from langchain.agents.middleware import (
     SummarizationMiddleware,
     TodoListMiddleware,
     wrap_model_call,
+    wrap_tool_call,
 )
 from langchain.chat_models import init_chat_model
 from langchain.mcp import MCPAdapter
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import AIMessageChunk, HumanMessage, ToolMessage
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
+from langgraph.store.sqlite.aio import AsyncSqliteStore
 from langgraph.types import Command
 
 from config import configure_logging, get_settings
+from guardrails import (
+    GuardrailReport,
+    sanitize_agent_output,
+    sanitize_tool_output,
+    sanitize_user_input,
+)
+from memory import build_memory_tools
+from observability import TRACKER, UsageCallback, log_turn, resolve_prices
+from reflection import critique, revision_prompt
 
 logger = logging.getLogger("github-agent.core")
 
@@ -56,6 +67,7 @@ WRITE_TOOLS = (
 
 # The MCP server lives next to this file; MCPAdapter launches it over stdio.
 SERVER_PATH = Path(__file__).with_name("server.py")
+
 
 def _is_malformed_tool_call(exc: BaseException) -> bool:
     """True for Groq's strict-schema rejection of a malformed tool call.
@@ -87,7 +99,9 @@ def _explain_tool_call_error(exc: BaseException) -> str:
     tool_match = _TOOL_NAME_RE.search(text)
     tool_name = tool_match.group(1) if tool_match else "the tool you just called"
 
-    parts = [f"Your last call to `{tool_name}` was rejected: its arguments didn't match its schema."]
+    parts = [
+        f"Your last call to `{tool_name}` was rejected: its arguments didn't match its schema."
+    ]
 
     missing = _MISSING_PROPS_RE.search(text)
     if missing:
@@ -131,8 +145,13 @@ async def retry_malformed_tool_call(request, handler):
 
 
 _RATE_LIMIT_MARKERS = (
-    "resource_exhausted", "rate limit", "rate_limit", "quota",
-    "too many requests", " 429", "'code': 429",
+    "resource_exhausted",
+    "rate limit",
+    "rate_limit",
+    "quota",
+    "too many requests",
+    " 429",
+    "'code': 429",
 )
 # Pull the provider's suggested wait out of the error (e.g. "retry in 51.2s"
 # or "'retryDelay': '51s'").
@@ -173,8 +192,10 @@ async def retry_on_rate_limit(request, handler):
                 raise
             wait = _retry_delay_seconds(exc)
             logger.warning(
-                "Rate limited by the model provider; waiting %.0fs then "
-                "retrying (attempt %d/%d).", wait, attempts, max_attempts,
+                "Rate limited by the model provider; waiting %.0fs then retrying (attempt %d/%d).",
+                wait,
+                attempts,
+                max_attempts,
             )
             await asyncio.sleep(wait)
 
@@ -213,6 +234,15 @@ Working style:
   instead of retrying blindly.
 
 Implementing a code change (branch + edits + PR) -- follow this exactly:
+- Work the WHOLE requirement autonomously in one go: figure out every
+  file that must change, change them all, and open the PR -- without
+  stopping to ask the user to confirm files or steps. Decide and act.
+  Only pause for the write-approval gate (that is automatic).
+- If the requirement doesn't name the files, work out the full set
+  yourself first: a full-stack feature usually spans data model ->
+  database/service -> API endpoint -> API client -> UI. Briefly explore
+  (list_repo_files + read the few relevant files) to confirm the real
+  paths, then change ALL of them. Do not do just one layer.
 - FIRST call write_todos with ONE item per file you must change, plus a
   final "open pull request" item. This checklist is how you track
   progress -- keep it accurate.
@@ -240,17 +270,121 @@ Tone: concise and technical. Assume the user is a developer.
 """
 
 
+def content_to_text(content) -> str:
+    """Flatten a message's ``content`` to plain text.
+
+    Providers disagree on the shape: OpenAI-style models return a ``str``,
+    Gemini returns a list of blocks such as
+    ``[{"type": "text", "text": "...", "extras": {...}}]``. Rendering the
+    raw list in a UI shows Python repr garbage, so everything user-facing
+    goes through this.
+    """
+    if content is None:
+        return ""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for block in content:
+            if isinstance(block, str):
+                parts.append(block)
+            elif isinstance(block, dict) and block.get("type", "text") == "text":
+                parts.append(str(block.get("text", "")))
+        return "".join(parts)
+    return str(content)
+
+
+# --- guardrail middleware ----------------------------------------------------
+
+
+def make_tool_output_guard(redact_pii: bool = True):
+    """Middleware that sanitises every tool result BEFORE the model sees it.
+
+    This is the indirect-prompt-injection defence: a file in a repository is
+    untrusted input, so anything the tools return is scrubbed of credentials
+    (and optionally PII) and, if it reads like instructions, wrapped in an
+    explicit "treat as data" notice.
+    """
+
+    @wrap_tool_call
+    async def guard_tool_output(request, handler):
+        result = await handler(request)
+        if isinstance(result, ToolMessage):
+            raw = content_to_text(result.content)
+            clean, report = sanitize_tool_output(raw, redact_pii_values=redact_pii)
+            if not report.clean:
+                logger.warning(
+                    "guardrail triggered on tool=%s: %s",
+                    request.tool_call.get("name"),
+                    report.summary(),
+                )
+                return result.model_copy(update={"content": clean})
+        return result
+
+    return guard_tool_output
+
+
+# --- assembly ---------------------------------------------------------------
+
+
+def assemble_agent(model, tools, checkpointer=None, *, settings=None, system_prompt=SYSTEM_PROMPT):
+    """Build the compiled agent graph from its parts.
+
+    Kept separate from ``build_agent`` (which also opens the MCP subprocess
+    and SQLite connections) so the *same* graph -- middleware stack and all --
+    can be constructed in tests around a scripted fake model and local tools.
+    """
+    settings = settings or get_settings()
+    agent = create_agent(
+        model=model,
+        tools=tools,
+        system_prompt=system_prompt,
+        checkpointer=checkpointer,
+        middleware=[
+            # Progress tracking: gives the agent a `write_todos` tool so a
+            # multi-file change becomes an explicit checklist, marked done as
+            # it goes. Stops a weaker model re-doing a file it already did.
+            TodoListMiddleware(),
+            # Context-window management: past ~40 messages, fold older turns
+            # into a summary, keeping the latest 12 verbatim.
+            SummarizationMiddleware(model=model, trigger=("messages", 40), keep=("messages", 12)),
+            # Approval gate: pause and hand control to a human before any
+            # state-changing GitHub call executes.
+            HumanInTheLoopMiddleware(
+                interrupt_on={
+                    name: {"allowed_decisions": ["approve", "reject"]} for name in WRITE_TOOLS
+                },
+                description_prefix="Approval required -- this changes GitHub",
+            ),
+            # Wait out provider rate limits instead of failing the run.
+            retry_on_rate_limit,
+            # Recover from malformed tool calls with a corrective note.
+            retry_malformed_tool_call,
+            # Treat tool output as untrusted data: redact secrets/PII and
+            # quarantine anything that reads like instructions.
+            make_tool_output_guard(redact_pii=settings.guardrails_redact_pii),
+            # Safety valve: cap model calls per turn.
+            ModelCallLimitMiddleware(run_limit=settings.agent_run_limit, exit_behavior="end"),
+        ],
+    )
+    # Kept for the optional reflection step (see send()).
+    try:
+        agent._reflection_model = model
+    except Exception:  # pragma: no cover - attribute assignment is best-effort
+        pass
+    return agent
+
+
 @contextlib.asynccontextmanager
 async def build_agent():
     """Yield a compiled, memory-backed agent.
 
         async with build_agent() as agent:
-            cfg = {"configurable": {"thread_id": "abc123"}}
+            cfg = {"configurable": {"thread_id": "abc123", "user_id": "me"}}
             await agent.ainvoke({"messages": [("user", "hi")]}, cfg)
 
-    The `thread_id` in the config selects which conversation's memory to
-    load and append to. Reuse it for a continuing chat; change it to
-    start fresh.
+    ``thread_id`` selects which conversation's SHORT-term memory to load;
+    ``user_id`` selects whose LONG-term memory ``remember``/``recall`` use.
     """
     configure_logging()
     settings = get_settings()
@@ -260,99 +394,204 @@ async def build_agent():
     model = init_chat_model(settings.chat_model)
 
     db_path = Path(settings.checkpoint_db).resolve()
+    store_path = Path(settings.memory_db).resolve()
 
     async with (
         MCPAdapter(SERVER_PATH) as mcp,
         AsyncSqliteSaver.from_conn_string(str(db_path)) as checkpointer,
+        AsyncSqliteStore.from_conn_string(str(store_path)) as store,
     ):
-        tools = await mcp.list_tools()
-
-        agent = create_agent(
-            model=model,
-            tools=tools,
-            system_prompt=SYSTEM_PROMPT,
-            checkpointer=checkpointer,
-            middleware=[
-                # Progress tracking: gives the agent a `write_todos` tool so
-                # a multi-file change becomes an explicit checklist (one item
-                # per file), marked done as it goes. This is what stops a
-                # weaker model from re-doing a file it already finished --
-                # the failure mode that made it commit one file five times.
-                TodoListMiddleware(),
-                # Context-window management: once the history passes ~40
-                # messages, fold the older ones into a running summary,
-                # always keeping the most recent 12 verbatim. Without
-                # this a long chat eventually overflows the model's
-                # context and every turn keeps getting more expensive.
-                SummarizationMiddleware(
-                    model=model,
-                    trigger=("messages", 40),
-                    keep=("messages", 12),
-                ),
-                # Approval gate: pause the run and hand control back to a
-                # human before any state-changing GitHub call executes.
-                HumanInTheLoopMiddleware(
-                    interrupt_on={
-                        name: {"allowed_decisions": ["approve", "reject"]}
-                        for name in WRITE_TOOLS
-                    },
-                    description_prefix="Approval required -- this changes GitHub",
-                ),
-                # Recover from Groq's strict-schema rejection of a
-                # malformed tool call by retrying with a corrective note
-                # (not a blind resample -- see the hook's docstring).
-                retry_on_rate_limit,
-                retry_malformed_tool_call,
-                # Safety valve: cap model calls per user turn so a confused
-                # tool loop can't run up an unbounded bill. Configurable
-                # (AGENT_RUN_LIMIT) because a multi-file code change needs
-                # many legitimate read+write steps.
-                ModelCallLimitMiddleware(
-                    run_limit=settings.agent_run_limit, exit_behavior="end"
-                ),
-            ],
-        )
-        yield agent
+        await store.setup()
+        tools = [*(await mcp.list_tools()), *build_memory_tools(store)]
+        yield assemble_agent(model, tools, checkpointer, settings=settings)
 
 
-def _step_from_result(result: dict) -> dict:
-    """Turn a raw graph result into either a final answer or a pending
-    approval request -- the two states any caller (CLI or UI) needs to
-    handle.
+# --- running a turn -----------------------------------------------------------
 
-        {"type": "final", "content": "..."}
-        {"type": "interrupt", "action_requests": [{"name": ..., "args": ...}]}
+
+def _thread_id(config: dict) -> str:
+    return str((config.get("configurable") or {}).get("thread_id", "unknown"))
+
+
+def _with_callbacks(config: dict, callback) -> dict:
+    merged = dict(config)
+    merged["callbacks"] = [*(config.get("callbacks") or []), callback]
+    return merged
+
+
+def _sanitize_user_content(content) -> tuple[object, GuardrailReport]:
+    """Redact credentials from what the human typed, text or multimodal."""
+    if isinstance(content, str):
+        return sanitize_user_input(content)
+    report = GuardrailReport()
+    out = []
+    for block in content:
+        if isinstance(block, dict) and block.get("type") == "text":
+            clean, r = sanitize_user_input(str(block.get("text", "")))
+            report = report.merge(r)
+            out.append({**block, "text": clean})
+        else:
+            out.append(block)
+    return out, report
+
+
+def _step_from_result(result: dict, *, redact_pii: bool = True) -> dict:
+    """Turn a raw graph result into one of the two states any caller needs:
+
+    {"type": "final", "content": "..."}
+    {"type": "interrupt", "action_requests": [{"name": ..., "args": ...}]}
     """
     if result.get("__interrupt__"):
         interrupt = result["__interrupt__"][0]
         payload = getattr(interrupt, "value", interrupt)  # HITLRequest (a dict)
         return {"type": "interrupt", "action_requests": payload["action_requests"]}
-    return {"type": "final", "content": result["messages"][-1].content}
+    text = content_to_text(result["messages"][-1].content)
+    clean, report = sanitize_agent_output(text, redact_pii_values=redact_pii)
+    step: dict = {"type": "final", "content": clean}
+    if not report.clean:
+        step["guardrails"] = report.summary()
+    return step
+
+
+def _evidence_since_last_human(messages) -> list[str]:
+    """Tool outputs produced in the current turn (the claims' ground truth)."""
+    out: list[str] = []
+    for m in reversed(messages):
+        if isinstance(m, HumanMessage):
+            break
+        if isinstance(m, ToolMessage):
+            out.append(content_to_text(m.content))
+    return list(reversed(out))
+
+
+async def _run_graph(agent, payload, config: dict) -> tuple[dict, list]:
+    """Invoke the graph once, attaching usage tracking. Returns (step, messages)."""
+    settings = get_settings()
+    cb = UsageCallback(resolve_prices(settings.model_prices_json))
+    result = await agent.ainvoke(payload, _with_callbacks(config, cb))
+    metrics = cb.snapshot()
+    TRACKER.record(_thread_id(config), metrics)
+    log_turn(_thread_id(config), metrics)
+    step = _step_from_result(result, redact_pii=settings.guardrails_redact_pii)
+    step["usage"] = metrics.as_dict()
+    return step, result.get("messages", [])
 
 
 async def send(agent, config: dict, content) -> dict:
-    """Send one user message. Returns a "final" or "interrupt" step (see
-    ``_step_from_result``).
+    """Send one user message. Returns a "final" or "interrupt" step.
 
-    ``content`` is either a plain string, or a list of content blocks for a
-    multimodal message, e.g. text plus one or more images::
-
-        [{"type": "text", "text": "fix this error"},
-         {"type": "image_url", "image_url": "data:image/png;base64,..."}]
-
-    HumanMessage accepts both forms, so the agent can read a screenshot the
-    same way it reads typed text (works because the model is multimodal).
+    ``content`` is a plain string, or a list of content blocks for a
+    multimodal message (text plus images). Credentials in the user's text are
+    redacted before they reach the model or the saved conversation.
     """
-    result = await agent.ainvoke({"messages": [HumanMessage(content=content)]}, config)
-    return _step_from_result(result)
+    settings = get_settings()
+    content, input_report = _sanitize_user_content(content)
+    step, messages = await _run_graph(agent, {"messages": [HumanMessage(content=content)]}, config)
+
+    if not input_report.clean:
+        step["input_guardrails"] = input_report.summary()
+
+    # Optional self-critique: check the answer against the tool evidence and
+    # allow one revision. Off by default -- it costs extra model calls.
+    model = getattr(agent, "_reflection_model", None)
+    evidence = _evidence_since_last_human(messages)
+    if settings.enable_reflection and step["type"] == "final" and model is not None and evidence:
+        question = content if isinstance(content, str) else content_to_text(content)
+        verdict = await critique(model, question, step["content"], evidence)
+        step["reflection"] = {
+            "verdict": verdict.verdict,
+            "issues": verdict.issues,
+            "revised": False,
+        }
+        if verdict.verdict == "revise":
+            note = {"messages": [HumanMessage(content=revision_prompt(verdict.issues))]}
+            revised, _ = await _run_graph(agent, note, config)
+            if revised["type"] == "final":
+                revised["reflection"] = {**step["reflection"], "revised": True}
+                if step.get("usage") and revised.get("usage"):
+                    for k in ("model_calls", "input_tokens", "output_tokens", "tool_calls"):
+                        revised["usage"][k] += step["usage"].get(k, 0)
+                    revised["usage"]["total_tokens"] = (
+                        revised["usage"]["input_tokens"] + revised["usage"]["output_tokens"]
+                    )
+                step = revised
+    return step
 
 
 async def resume(agent, config: dict, decisions: list[dict]) -> dict:
-    """Resume a run paused on an approval request, one decision per
-    pending tool call (``{"type": "approve"}`` or
-    ``{"type": "reject", "message": "..."}``)."""
-    result = await agent.ainvoke(Command(resume={"decisions": decisions}), config)
-    return _step_from_result(result)
+    """Resume a run paused on an approval request, one decision per pending
+    tool call (``{"type": "approve"}`` or ``{"type": "reject", "message": ...}``)."""
+    step, _ = await _run_graph(agent, Command(resume={"decisions": decisions}), config)
+    return step
+
+
+async def stream_turn(agent, config: dict, content=None, *, decisions: list[dict] | None = None):
+    """Run a turn and yield events as they happen (async generator).
+
+    Events::
+
+        {"type": "token",      "text": "..."}        answer text, incrementally
+        {"type": "tool_start", "name": "read_file"}  agent decided to call a tool
+        {"type": "tool_end",   "name": "read_file"}  the tool returned
+        {"type": "final",      "content": "...", "usage": {...}}   terminal
+        {"type": "interrupt",  "action_requests": [...]}           terminal
+
+    Pass ``content`` for a new message, or ``decisions`` to resume after an
+    approval. The terminal event has the same shape as ``send``/``resume``.
+    Note: tokens stream raw; the terminal ``final`` carries the sanitised text
+    and callers should replace what they displayed with it.
+    """
+    settings = get_settings()
+    input_report = GuardrailReport()
+    if decisions is not None:
+        payload = Command(resume={"decisions": decisions})
+    else:
+        content, input_report = _sanitize_user_content(content)
+        payload = {"messages": [HumanMessage(content=content)]}
+
+    cb = UsageCallback(resolve_prices(settings.model_prices_json))
+    cfg = _with_callbacks(config, cb)
+    interrupted = None
+
+    async for mode, data in agent.astream(payload, cfg, stream_mode=["messages", "updates"]):
+        if mode == "messages":
+            chunk, _meta = data
+            if isinstance(chunk, AIMessageChunk):
+                for tcc in chunk.tool_call_chunks or []:
+                    if tcc.get("name"):
+                        yield {"type": "tool_start", "name": tcc["name"]}
+                text = content_to_text(chunk.content)
+                if text:
+                    yield {"type": "token", "text": text}
+            elif isinstance(chunk, ToolMessage):
+                yield {"type": "tool_end", "name": chunk.name}
+        elif mode == "updates" and isinstance(data, dict) and "__interrupt__" in data:
+            interrupted = data["__interrupt__"]
+
+    metrics = cb.snapshot()
+    TRACKER.record(_thread_id(config), metrics)
+    log_turn(_thread_id(config), metrics, streamed=True)
+
+    if interrupted:
+        first = interrupted[0]
+        payload_v = getattr(first, "value", first)
+        yield {
+            "type": "interrupt",
+            "action_requests": payload_v["action_requests"],
+            "usage": metrics.as_dict(),
+        }
+        return
+
+    state = await agent.aget_state(cfg)
+    last = (state.values.get("messages") or [None])[-1]
+    text = content_to_text(getattr(last, "content", ""))
+    clean, report = sanitize_agent_output(text, redact_pii_values=settings.guardrails_redact_pii)
+    final: dict = {"type": "final", "content": clean, "usage": metrics.as_dict()}
+    if not report.clean:
+        final["guardrails"] = report.summary()
+    if not input_report.clean:
+        final["input_guardrails"] = input_report.summary()
+    yield final
 
 
 async def run_turn(agent, config: dict, text: str, approve) -> str:

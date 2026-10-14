@@ -33,23 +33,82 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 from config import get_settings
 from github_client import GitHubClient
+from retrieval import BM25, looks_like_identifier, reciprocal_rank_fusion
 
 logger = logging.getLogger(__name__)
 
 # Directories that are never worth indexing (dependencies, build output).
 _SKIP_DIRS = {
-    ".git", ".hg", ".svn", "node_modules", "venv", ".venv", "env",
-    "dist", "build", "__pycache__", ".next", ".nuxt", "target", "vendor",
-    ".mypy_cache", ".pytest_cache", ".idea", ".vscode", "site-packages",
+    ".git",
+    ".hg",
+    ".svn",
+    "node_modules",
+    "venv",
+    ".venv",
+    "env",
+    "dist",
+    "build",
+    "__pycache__",
+    ".next",
+    ".nuxt",
+    "target",
+    "vendor",
+    ".mypy_cache",
+    ".pytest_cache",
+    ".idea",
+    ".vscode",
+    "site-packages",
 }
 # File extensions we treat as indexable text.
 _TEXT_EXT = {
-    ".py", ".js", ".ts", ".jsx", ".tsx", ".java", ".go", ".rb", ".rs",
-    ".c", ".h", ".cc", ".cpp", ".hpp", ".cs", ".php", ".swift", ".kt",
-    ".scala", ".m", ".mm", ".sh", ".bash", ".zsh", ".ps1", ".sql",
-    ".md", ".mdx", ".rst", ".txt", ".toml", ".yaml", ".yml", ".json",
-    ".ini", ".cfg", ".conf", ".xml", ".html", ".css", ".scss", ".less",
-    ".gradle", ".tf", ".proto", ".graphql", ".vue", ".svelte",
+    ".py",
+    ".js",
+    ".ts",
+    ".jsx",
+    ".tsx",
+    ".java",
+    ".go",
+    ".rb",
+    ".rs",
+    ".c",
+    ".h",
+    ".cc",
+    ".cpp",
+    ".hpp",
+    ".cs",
+    ".php",
+    ".swift",
+    ".kt",
+    ".scala",
+    ".m",
+    ".mm",
+    ".sh",
+    ".bash",
+    ".zsh",
+    ".ps1",
+    ".sql",
+    ".md",
+    ".mdx",
+    ".rst",
+    ".txt",
+    ".toml",
+    ".yaml",
+    ".yml",
+    ".json",
+    ".ini",
+    ".cfg",
+    ".conf",
+    ".xml",
+    ".html",
+    ".css",
+    ".scss",
+    ".less",
+    ".gradle",
+    ".tf",
+    ".proto",
+    ".graphql",
+    ".vue",
+    ".svelte",
 }
 # Extension-less files worth keeping when the basename matches.
 _TEXT_NAMES = {"Dockerfile", "Makefile", "README", "LICENSE", ".gitignore"}
@@ -101,6 +160,8 @@ class RepoIndex:
         self._root.mkdir(parents=True, exist_ok=True)
         self._max_chunks = s.rag_max_chunks
         self._max_file_bytes = s.rag_max_file_bytes
+        self._hybrid = s.rag_hybrid
+        self._candidates = s.rag_candidates
         self._embeddings = GoogleGenerativeAIEmbeddings(model=s.embedding_model)
         self._splitter = RecursiveCharacterTextSplitter(
             chunk_size=s.rag_chunk_size,
@@ -156,21 +217,55 @@ class RepoIndex:
     # -- query ----------------------------------------------------
 
     def search(self, repo: str, query: str, k: int = 6) -> list[Hit]:
+        """Top-``k`` chunks for ``query``.
+
+        With hybrid on (default) this runs BOTH retrievers over the same
+        index and fuses their rankings with Reciprocal Rank Fusion:
+
+        * dense  -- embedding similarity: finds code by *meaning*
+        * BM25   -- keyword scoring: finds exact identifiers / error codes
+
+        A query like "where is get_policies_async defined" is a keyword
+        problem; "how are rate limits handled" is a meaning problem. Fusing
+        gets both right without choosing in advance.
+        """
         if not self.is_indexed(repo):
-            raise FileNotFoundError(
-                f"{repo} has not been indexed yet. Call index_repo first."
-            )
+            raise FileNotFoundError(f"{repo} has not been indexed yet. Call index_repo first.")
         store = FAISS.load_local(
             str(self._dir_for(repo)),
             self._embeddings,
             allow_dangerous_deserialization=True,  # our own local file
         )
-        results = store.similarity_search(query, k=k)
+
+        if not self._hybrid:
+            docs = store.similarity_search(query, k=k)
+        else:
+            # Pull a wider candidate pool from each retriever, then fuse.
+            pool = max(self._candidates, k)
+            dense = store.similarity_search(query, k=pool)
+            all_docs = list(store.docstore._dict.values())  # every indexed chunk
+            bm25 = BM25([d.page_content for d in all_docs])
+            lexical = [all_docs[i] for i in bm25.top(query, pool)]
+
+            def key(d: Document) -> tuple[str, int]:
+                return (d.metadata.get("path", "?"), int(d.metadata.get("start_line", 1)))
+
+            by_key = {key(d): d for d in [*dense, *lexical]}
+            # For code-shaped queries ("get_policies_async", "Policies.tsx")
+            # the exact-match leg is far more trustworthy than embeddings.
+            lexical_weight = 2.0 if looks_like_identifier(query) else 1.0
+            fused = reciprocal_rank_fusion(
+                [[key(d) for d in dense], [key(d) for d in lexical]],
+                top_n=k,
+                weights=[1.0, lexical_weight],
+            )
+            docs = [by_key[kk] for kk in fused]
+
         return [
             Hit(
                 path=d.metadata.get("path", "?"),
                 start_line=int(d.metadata.get("start_line", 1)),
                 text=d.page_content,
             )
-            for d in results
+            for d in docs
         ]

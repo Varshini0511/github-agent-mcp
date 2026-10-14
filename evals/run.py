@@ -55,8 +55,13 @@ def deterministic_checks(case: dict, answer: str, tools: set[str]) -> list[dict]
     low = answer.lower()
 
     for t in case.get("expect_tools", []):
-        out.append({"name": f"used tool `{t}`", "ok": t in tools,
-                    "detail": f"tools called: {sorted(tools) or 'none'}"})
+        out.append(
+            {
+                "name": f"used tool `{t}`",
+                "ok": t in tools,
+                "detail": f"tools called: {sorted(tools) or 'none'}",
+            }
+        )
 
     for s in case.get("expect_contains", []):
         out.append({"name": f"answer contains '{s}'", "ok": s.lower() in low, "detail": ""})
@@ -107,7 +112,7 @@ async def main(argv: list[str]) -> int:
     if "--json" in argv:
         i = argv.index("--json")
         json_out = argv[i + 1]
-        argv = argv[:i] + argv[i + 2:]
+        argv = argv[:i] + argv[i + 2 :]
 
     wanted = [a for a in argv if not a.startswith("--")]
     cases = [c for c in load_cases() if not wanted or c["id"] in wanted]
@@ -133,12 +138,21 @@ async def main(argv: list[str]) -> int:
                 try:
                     results.append(await run_case(agent, judge_model, case))
                 except Exception as exc:  # a crash is itself a failed case
-                    results.append({
-                        "id": case["id"], "passed": False, "deterministic_ok": False,
-                        "checks": [], "judge": {"score": 0, "verdict": "fail",
-                        "reasoning": f"run crashed: {type(exc).__name__}: {exc}"},
-                        "answer": "", "tools": [],
-                    })
+                    results.append(
+                        {
+                            "id": case["id"],
+                            "passed": False,
+                            "deterministic_ok": False,
+                            "checks": [],
+                            "judge": {
+                                "score": 0,
+                                "verdict": "fail",
+                                "reasoning": f"run crashed: {type(exc).__name__}: {exc}",
+                            },
+                            "answer": "",
+                            "tools": [],
+                        }
+                    )
                 if n + 1 < len(mode_cases):
                     time.sleep(3)  # gentle on the Groq free-tier rate limit
 

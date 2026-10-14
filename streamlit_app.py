@@ -46,7 +46,7 @@ if _secrets:
         except Exception:
             pass
 
-from agent_core import build_agent, resume, send
+from agent_core import build_agent, stream_turn
 from config import get_settings
 from multi_agent import build_supervisor
 from runner import AgentWorker, AsyncRunner
@@ -102,17 +102,80 @@ def get_session(mode: str) -> dict:
             "thread_id": new_thread_id(mode),
             "messages": [],  # [{"role": "user"|"assistant", "content": str}]
             "pending": None,  # list[ActionRequest] while awaiting approval
+            "usage": empty_usage(),
         }
     return sessions[mode]
 
 
+def empty_usage() -> dict:
+    return {"model_calls": 0, "tokens": 0, "cost": 0.0, "latency": 0.0, "tool_calls": 0}
+
+
+def _notes_for(step: dict) -> list[str]:
+    """Human-readable footnotes for a finished answer."""
+    notes: list[str] = []
+    if step.get("input_guardrails"):
+        notes.append(f"🛡️ Your message: {step['input_guardrails']} before it reached the model.")
+    if step.get("guardrails"):
+        notes.append(f"🛡️ Answer filtered: {step['guardrails']}.")
+    refl = step.get("reflection")
+    if refl:
+        if refl.get("revised"):
+            notes.append("🔍 Self-check found unsupported claims — answer was revised.")
+        else:
+            notes.append("🔍 Self-check: answer is supported by the tool output.")
+    return notes
+
+
 def apply_step(session: dict, step: dict) -> None:
-    """Fold a `send`/`resume` result into the session's chat state."""
+    """Fold a terminal stream event (final / interrupt) into chat state."""
+    u = step.get("usage")
+    if u:
+        t = session["usage"]
+        t["model_calls"] += u.get("model_calls", 0)
+        t["tokens"] += u.get("total_tokens", 0)
+        t["cost"] += u.get("cost_usd") or 0.0
+        t["latency"] += u.get("latency_s", 0.0)
+        t["tool_calls"] += u.get("tool_calls", 0)
+
     if step["type"] == "interrupt":
         session["pending"] = step["action_requests"]
     else:
         session["pending"] = None
-        session["messages"].append({"role": "assistant", "content": step["content"]})
+        session["messages"].append(
+            {"role": "assistant", "content": step["content"], "notes": _notes_for(step)}
+        )
+
+
+def run_stream(session: dict, worker, config: dict, *, content=None, decisions=None) -> None:
+    """Run a turn, rendering tool activity and tokens live, then fold the
+    terminal event into the session and rerun to draw it permanently."""
+    final: dict | None = None
+    buffer = ""
+    with st.chat_message("assistant"):
+        status = st.status("Working…", expanded=True)
+        answer = st.empty()
+        try:
+            events = worker.stream(
+                lambda agent: stream_turn(agent, config, content, decisions=decisions)
+            )
+            for ev in events:
+                kind = ev["type"]
+                if kind == "tool_start":
+                    status.write(f"🔧 calling `{ev['name']}`…")
+                elif kind == "tool_end":
+                    status.write(f"✅ `{ev['name']}` returned")
+                elif kind == "token":
+                    buffer += ev["text"]
+                    answer.markdown(buffer + " ▌")
+                else:  # "final" | "interrupt"
+                    final = ev
+        except Exception as exc:  # e.g. provider outage after retries
+            final = {"type": "final", "content": f"⚠️ Error: {exc}"}
+        status.update(label="Done", state="complete", expanded=False)
+
+    apply_step(session, final or {"type": "final", "content": buffer or "(no response)"})
+    st.rerun()
 
 
 # -- sidebar -------------------------------------------------------------
@@ -135,13 +198,27 @@ with st.sidebar:
         session["thread_id"] = new_thread_id(mode)
         session["messages"] = []
         session["pending"] = None
+        session["usage"] = empty_usage()
         st.rerun()
+
+    st.divider()
+    usage = session["usage"]
+    st.caption("This conversation")
+    m1, m2 = st.columns(2)
+    m1.metric("Model calls", usage["model_calls"])
+    m2.metric("Tokens", f"{usage['tokens']:,}")
+    st.caption(
+        f"{usage['tool_calls']} tool calls · {usage['latency']:.0f}s · "
+        f"≈ ${usage['cost']:.4f} at list price (free tier bills $0)"
+    )
 
     st.divider()
     settings = get_settings()
     st.caption("Configuration")
     st.write(f"chat model — `{settings.chat_model}`")
     st.write("writes — " + ("🟢 enabled" if settings.allow_writes else "🔴 disabled"))
+    st.write("self-check — " + ("🟢 on" if settings.enable_reflection else "⚪ off"))
+    st.write("PII redaction — " + ("🟢 on" if settings.guardrails_redact_pii else "⚪ off"))
     if not settings.allow_writes:
         st.caption("Set ALLOW_WRITES=true in .env to let approved writes execute.")
 
@@ -166,6 +243,8 @@ st.caption(
 for msg in session["messages"]:
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"])
+        for note in msg.get("notes", []):
+            st.caption(note)
 
 config = {"configurable": {"thread_id": session["thread_id"]}}
 worker: AgentWorker = session["worker"]
@@ -189,13 +268,7 @@ if session["pending"]:
             else {"type": "reject", "message": "Rejected by the user via the UI."}
             for _ in session["pending"]
         ]
-        with st.spinner("Working..."):
-            try:
-                step = worker.call(lambda agent: resume(agent, config, decisions))
-            except Exception as exc:  # e.g. Groq rate limit
-                step = {"type": "final", "content": f"⚠️ Error: {exc}"}
-        apply_step(session, step)
-        st.rerun()
+        run_stream(session, worker, config, decisions=decisions)
 
 # -- new message (text and/or screenshots) ---------------------------
 
@@ -215,18 +288,23 @@ if chat_val:
     if text or files:
         # Build the message: plain string if text-only, else multimodal blocks.
         if files:
-            content = [{
-                "type": "text",
-                "text": text or "Here is a screenshot. Read any error in it and help me fix it.",
-            }]
+            content = [
+                {
+                    "type": "text",
+                    "text": text
+                    or "Here is a screenshot. Read any error in it and help me fix it.",
+                }
+            ]
             for f in files:
                 raw = f.getvalue()
                 b64 = base64.b64encode(raw).decode()
                 mime = getattr(f, "type", None) or "image/png"
-                content.append({
-                    "type": "image_url",
-                    "image_url": f"data:{mime};base64,{b64}",
-                })
+                content.append(
+                    {
+                        "type": "image_url",
+                        "image_url": f"data:{mime};base64,{b64}",
+                    }
+                )
         else:
             content = text
 
@@ -236,10 +314,4 @@ if chat_val:
             shown += f"\n\n📎 {len(files)} image(s) attached"
         session["messages"].append({"role": "user", "content": shown})
 
-        with st.spinner("Thinking…"):
-            try:
-                step = worker.call(lambda agent: send(agent, config, content))
-            except Exception as exc:
-                step = {"type": "final", "content": f"⚠️ Error: {exc}"}
-        apply_step(session, step)
-        st.rerun()
+        run_stream(session, worker, config, content=content)

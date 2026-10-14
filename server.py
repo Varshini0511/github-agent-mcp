@@ -87,7 +87,7 @@ def list_issues(repo: str, state: str = "open") -> str:
     if not issues:
         return f"No {state} issues."
     return "\n".join(
-        f"#{i['number']} [{', '.join(l['name'] for l in i.get('labels', [])) or 'no labels'}] "
+        f"#{i['number']} [{', '.join(lbl['name'] for lbl in i.get('labels', [])) or 'no labels'}] "
         f"{i['title']}"
         for i in issues
     )
@@ -101,7 +101,7 @@ def get_issue(repo: str, number: int) -> str:
         i = gh.get_issue(repo, number)
     except GitHubError as exc:
         return f"Error: {exc}"
-    labels = ", ".join(l["name"] for l in i.get("labels", [])) or "none"
+    labels = ", ".join(lbl["name"] for lbl in i.get("labels", [])) or "none"
     return (
         f"#{i['number']} {i['title']}\n"
         f"state: {i['state']}   labels: {labels}\n\n"
@@ -154,9 +154,7 @@ def search_code(repo: str, query: str) -> str:
     if not hits:
         return "No matches."
 
-    blocks = [
-        f"--- {h.path}:{h.start_line} ---\n{h.text}".rstrip() for h in hits
-    ]
+    blocks = [f"--- {h.path}:{h.start_line} ---\n{h.text}".rstrip() for h in hits]
     return "\n\n".join(blocks)
 
 
@@ -264,9 +262,7 @@ def edit_file(
 
 
 @mcp.tool
-def open_pull_request(
-    repo: str, title: str, head: str, base: str = "", body: str = ""
-) -> str:
+def open_pull_request(repo: str, title: str, head: str, base: str = "", body: str = "") -> str:
     """Open a pull request from branch `head` into `base` (default branch if empty)."""
     logger.info("open_pull_request repo=%s head=%s", repo, head)
     if msg := _guard():

@@ -24,8 +24,7 @@ SCENARIOS = [
     (
         "Repo explainer (single agent)",
         "single",
-        f"Give me a 3-sentence overview of what {REPO} does and its main "
-        f"directories.",
+        f"Give me a 3-sentence overview of what {REPO} does and its main directories.",
     ),
     (
         "Code locator via RAG (single agent)",
@@ -37,8 +36,7 @@ SCENARIOS = [
     (
         "Read a specific file (single agent)",
         "single",
-        f"Show the first 15 lines of README.md in {REPO} and summarise the "
-        f"setup steps.",
+        f"Show the first 15 lines of README.md in {REPO} and summarise the setup steps.",
     ),
     (
         "Issue triage (supervisor -> issue_triage)",
@@ -49,8 +47,7 @@ SCENARIOS = [
     (
         "Write flow with approval gate (single agent)",
         "single",
-        f"Fix a typo in the README of {REPO} by opening a pull request from a "
-        f"new branch.",
+        f"Fix a typo in the README of {REPO} by opening a pull request from a new branch.",
     ),
 ]
 
@@ -91,9 +88,7 @@ async def main(which: list[str]) -> None:
             print(f"{i}. [{mode:6}] {title}")
         return
 
-    indices = (
-        [int(which[0]) - 1] if which and which[0].isdigit() else range(len(SCENARIOS))
-    )
+    indices = [int(which[0]) - 1] if which and which[0].isdigit() else range(len(SCENARIOS))
     for n, i in enumerate(indices):
         await _run_one(i)
         if n + 1 < len(list(indices)):

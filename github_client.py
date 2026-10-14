@@ -66,9 +66,7 @@ class GitHubClient:
         self._backoff_initial = (
             backoff_initial if backoff_initial is not None else s.retry_backoff_initial
         )
-        self._backoff_max = (
-            backoff_max if backoff_max is not None else s.retry_backoff_max
-        )
+        self._backoff_max = backoff_max if backoff_max is not None else s.retry_backoff_max
 
         # A Session pools TCP connections and reuses them across calls
         # (keep-alive), which is noticeably faster than a fresh connection
@@ -112,9 +110,7 @@ class GitHubClient:
         return f"Opened issue #{data['number']}: {data['html_url']}"
 
     def comment_on_issue(self, repo: str, number: int, body: str) -> str:
-        data = self.post(
-            f"/repos/{repo}/issues/{number}/comments", {"body": body}
-        ).json()
+        data = self.post(f"/repos/{repo}/issues/{number}/comments", {"body": body}).json()
         return f"Commented on #{number}: {data['html_url']}"
 
     def add_labels(self, repo: str, number: int, labels: list[str]) -> str:
@@ -130,9 +126,7 @@ class GitHubClient:
         )
         return f"Created branch '{new_branch}' from '{base}' ({sha[:7]})."
 
-    def put_file(
-        self, repo: str, path: str, content: str, message: str, branch: str
-    ) -> str:
+    def put_file(self, repo: str, path: str, content: str, message: str, branch: str) -> str:
         import base64 as _b64
 
         body: dict = {
@@ -150,9 +144,7 @@ class GitHubClient:
         data = self.put(f"/repos/{repo}/contents/{path}", body).json()
         return f"Wrote {path} on '{branch}': {data['commit']['html_url']}"
 
-    def edit_file(
-        self, repo: str, path: str, old: str, new: str, message: str, branch: str
-    ) -> str:
+    def edit_file(self, repo: str, path: str, old: str, new: str, message: str, branch: str) -> str:
         """Replace ``old`` with ``new`` in a file and commit -- a surgical
         edit. The full file is fetched and rewritten HERE, on the server,
         so the caller only ever handles the small changed snippet (this is
@@ -222,8 +214,7 @@ class GitHubClient:
         data = resp.json()
         if isinstance(data, list):
             raise GitHubError(
-                f"'{path}' is a directory, not a file. Use list_repo_files "
-                f"to see what's inside it."
+                f"'{path}' is a directory, not a file. Use list_repo_files to see what's inside it."
             )
         if data.get("encoding") != "base64":
             raise GitHubError(
@@ -260,13 +251,9 @@ class GitHubClient:
         # so it can read this instance's configuration -- and so tests can
         # dial the backoff down to zero.
         @retry(
-            retry=retry_if_exception_type(
-                (_Retry, requests.ConnectionError, requests.Timeout)
-            ),
+            retry=retry_if_exception_type((_Retry, requests.ConnectionError, requests.Timeout)),
             stop=stop_after_attempt(self._max_retries),
-            wait=wait_exponential_jitter(
-                initial=self._backoff_initial, max=self._backoff_max
-            ),
+            wait=wait_exponential_jitter(initial=self._backoff_initial, max=self._backoff_max),
             reraise=True,
         )
         def _attempt() -> requests.Response:
@@ -294,10 +281,7 @@ class GitHubClient:
 
     @staticmethod
     def _is_rate_limited(resp: requests.Response) -> bool:
-        return (
-            resp.status_code in (403, 429)
-            and resp.headers.get("X-RateLimit-Remaining") == "0"
-        )
+        return resp.status_code in (403, 429) and resp.headers.get("X-RateLimit-Remaining") == "0"
 
     def _sleep_off_rate_limit(self, resp: requests.Response) -> None:
         """Wait until the rate-limit window resets (bounded, so the agent
@@ -320,8 +304,7 @@ class GitHubClient:
         code = resp.status_code
         if code == 401:
             raise GitHubError(
-                "Authentication failed (401). GITHUB_TOKEN is missing, "
-                "malformed, or expired."
+                "Authentication failed (401). GITHUB_TOKEN is missing, malformed, or expired."
             )
         if code == 403:
             raise GitHubError(
