@@ -135,7 +135,11 @@ def test_edit_file_replaces_unique_snippet(gh):
     content = "hello\nworld\nfoo\n"
     responses.get(
         f"{API}/repos/o/r/contents/f.txt",
-        json={"encoding": "base64", "content": base64.b64encode(content.encode()).decode(), "sha": "abc"},
+        json={
+            "encoding": "base64",
+            "content": base64.b64encode(content.encode()).decode(),
+            "sha": "abc",
+        },
         status=200,
     )
     responses.put(
