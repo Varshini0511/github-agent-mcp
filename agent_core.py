@@ -48,6 +48,7 @@ from guardrails import (
 )
 from memory import build_memory_tools
 from observability import TRACKER, UsageCallback, log_turn, resolve_prices
+from ratelimit import is_rate_limited, retry_delay_seconds
 from reflection import critique, revision_prompt
 
 logger = logging.getLogger("github-agent.core")
@@ -144,32 +145,6 @@ async def retry_malformed_tool_call(request, handler):
             messages = [*messages, HumanMessage(content=_explain_tool_call_error(exc))]
 
 
-_RATE_LIMIT_MARKERS = (
-    "resource_exhausted",
-    "rate limit",
-    "rate_limit",
-    "quota",
-    "too many requests",
-    " 429",
-    "'code': 429",
-)
-# Pull the provider's suggested wait out of the error (e.g. "retry in 51.2s"
-# or "'retryDelay': '51s'").
-_RETRY_DELAY_RE = re.compile(r"retry[^0-9]{0,25}?(\d+(?:\.\d+)?)\s*s", re.IGNORECASE)
-
-
-def _is_rate_limited(exc: BaseException) -> bool:
-    s = str(exc).lower()
-    return any(m in s for m in _RATE_LIMIT_MARKERS)
-
-
-def _retry_delay_seconds(exc: BaseException, default: float = 30.0) -> float:
-    m = _RETRY_DELAY_RE.search(str(exc))
-    if m:
-        return min(float(m.group(1)) + 1.0, 65.0)  # +1s cushion, capped
-    return default
-
-
 @wrap_model_call
 async def retry_on_rate_limit(request, handler):
     """Wait out a provider rate-limit (HTTP 429 / RESOURCE_EXHAUSTED) and
@@ -188,9 +163,9 @@ async def retry_on_rate_limit(request, handler):
             return await handler(request)
         except Exception as exc:
             attempts += 1
-            if not _is_rate_limited(exc) or attempts >= max_attempts:
+            if not is_rate_limited(exc) or attempts >= max_attempts:
                 raise
-            wait = _retry_delay_seconds(exc)
+            wait = retry_delay_seconds(exc)
             logger.warning(
                 "Rate limited by the model provider; waiting %.0fs then retrying (attempt %d/%d).",
                 wait,

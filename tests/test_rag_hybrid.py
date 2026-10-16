@@ -70,3 +70,68 @@ def test_searching_an_unindexed_repo_raises(tmp_path):
     idx = _index(tmp_path, hybrid=True)
     with pytest.raises(FileNotFoundError):
         idx.search("never/indexed", "anything")
+
+
+# --- indexing hygiene + rate-limit-aware embedding ---------------------------
+
+
+def test_lockfiles_and_generated_files_are_not_indexed():
+    import io
+    import tarfile
+
+    from rag import _iter_repo_files
+
+    files = {
+        "repo-abc/src/app.py": b"print('hello')",
+        "repo-abc/package-lock.json": b'{"lockfileVersion": 3}',
+        "repo-abc/yarn.lock": b"# yarn lockfile",
+        "repo-abc/dist/bundle.min.js": b"var a=1;",
+        "repo-abc/static/app.js.map": b"{}",
+        "repo-abc/README.md": b"# Title",
+    }
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:gz") as tar:
+        for name, data in files.items():
+            info = tarfile.TarInfo(name)
+            info.size = len(data)
+            tar.addfile(info, io.BytesIO(data))
+
+    indexed = {rel for rel, _ in _iter_repo_files(buf.getvalue(), max_bytes=10_000)}
+    assert indexed == {"src/app.py", "README.md"}
+
+
+class _FlakyEmbeddings:
+    """Raises a provider-style 429 on its first call, then works."""
+
+    def __init__(self):
+        self.calls = 0
+
+    def embed_documents(self, texts):
+        self.calls += 1
+        if self.calls == 1:
+            raise RuntimeError("429 RESOURCE_EXHAUSTED. Please retry in 0.01s.")
+        return [[float(len(t))] for t in texts]
+
+
+def test_embedding_waits_out_a_rate_limit_and_keeps_going(monkeypatch):
+    idx = object.__new__(RepoIndex)
+    idx._embeddings = _FlakyEmbeddings()
+    slept = []
+    monkeypatch.setattr("rag.time.sleep", lambda s: slept.append(s))
+
+    vectors = idx._embed_batched(["a", "bb", "ccc"], batch_size=2)
+
+    assert vectors == [[1.0], [2.0], [3.0]]  # nothing lost or reordered
+    assert len(slept) == 1 and slept[0] >= 1.0  # honoured the provider's hint
+    assert idx._embeddings.calls == 3  # 1 failed + 2 batches
+
+
+def test_embedding_does_not_swallow_non_rate_limit_errors():
+    class Broken:
+        def embed_documents(self, texts):
+            raise ValueError("bad api key")
+
+    idx = object.__new__(RepoIndex)
+    idx._embeddings = Broken()
+    with pytest.raises(ValueError, match="bad api key"):
+        idx._embed_batched(["x"])

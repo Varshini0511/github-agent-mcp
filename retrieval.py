@@ -1,10 +1,15 @@
 """Hybrid retrieval primitives: BM25 keyword search + rank fusion.
 
-Why hybrid? Dense (embedding) search matches *meaning* but is weak on exact
-tokens -- an error code, a function name like ``get_policies_async``, an issue
-number. Keyword search (BM25) is the opposite. Running both and fusing the
-rankings consistently beats either alone on code, which is full of
-identifiers.
+Why hybrid? Dense (embedding) search matches *meaning* but can be weak on
+exact tokens -- an error code, a function name like ``get_policies_async``, an
+issue number. Keyword search (BM25) is the opposite. Fusing the two rankings is
+a cheap hedge: it never needs to be told which kind of query it got.
+
+Measured, not assumed: on one small repo (157 chunks, 8 identifier queries,
+ground truth = "chunk literally contains the token") hybrid recovered 21/28
+relevant chunks in the top 5 vs 19/28 for dense alone, with the same mean rank
+of the first hit. A modest, never-worse gain -- strong embeddings already do
+well on small repos. Reproduce with ``scripts/measure_retrieval.py``.
 
 This module is deliberately dependency-free (pure Python) so it is fast to
 import and trivially unit-testable; ``rag.py`` supplies the dense results and

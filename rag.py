@@ -23,6 +23,7 @@ import io
 import logging
 import re
 import tarfile
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -33,6 +34,7 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 from config import get_settings
 from github_client import GitHubClient
+from ratelimit import is_rate_limited, retry_delay_seconds
 from retrieval import BM25, looks_like_identifier, reciprocal_rank_fusion
 
 logger = logging.getLogger(__name__)
@@ -121,7 +123,29 @@ class Hit:
     text: str
 
 
+# Files that are text but carry no signal for code search: dependency lock
+# files and generated/minified output. A single package-lock.json can produce
+# hundreds of chunks of hashes, burning embedding quota and drowning BM25 in
+# noise.
+_SKIP_NAMES = {
+    "package-lock.json",
+    "npm-shrinkwrap.json",
+    "yarn.lock",
+    "pnpm-lock.yaml",
+    "poetry.lock",
+    "Pipfile.lock",
+    "uv.lock",
+    "Cargo.lock",
+    "composer.lock",
+    "Gemfile.lock",
+    "go.sum",
+}
+_SKIP_SUFFIXES = (".min.js", ".min.css", ".map", ".lock")
+
+
 def _is_text(name: str) -> bool:
+    if name in _SKIP_NAMES or name.lower().endswith(_SKIP_SUFFIXES):
+        return False
     return Path(name).suffix.lower() in _TEXT_EXT or name in _TEXT_NAMES
 
 
@@ -181,6 +205,36 @@ class RepoIndex:
 
     # -- build ------------------------------------------------------
 
+    def _embed_batched(self, texts: list[str], batch_size: int = 32, max_attempts: int = 6):
+        """Embed ``texts`` in small batches, waiting out provider rate limits.
+
+        Free-tier embedding quotas are per-minute (e.g. 100 texts/min), so a
+        repo with a few hundred chunks cannot be embedded in one burst. Each
+        batch is retried after the provider's suggested delay; any other error
+        propagates immediately.
+        """
+        vectors: list[list[float]] = []
+        for i in range(0, len(texts), batch_size):
+            chunk = texts[i : i + batch_size]
+            for attempt in range(1, max_attempts + 1):
+                try:
+                    vectors.extend(self._embeddings.embed_documents(chunk))
+                    break
+                except Exception as exc:
+                    if not is_rate_limited(exc) or attempt == max_attempts:
+                        raise
+                    wait = retry_delay_seconds(exc)
+                    logger.warning(
+                        "embedding rate-limited; waiting %.0fs (batch %d/%d, attempt %d/%d)",
+                        wait,
+                        i // batch_size + 1,
+                        -(-len(texts) // batch_size),
+                        attempt,
+                        max_attempts,
+                    )
+                    time.sleep(wait)
+        return vectors
+
     def index(self, repo: str, ref: str = "") -> str:
         logger.info("indexing %s@%s", repo, ref or "default")
         tar = self._gh.download_tarball(repo, ref)
@@ -207,7 +261,12 @@ class RepoIndex:
         if not docs:
             return f"No indexable text files found in {repo}."
 
-        store = FAISS.from_documents(docs, self._embeddings)
+        vectors = self._embed_batched([d.page_content for d in docs])
+        store = FAISS.from_embeddings(
+            list(zip([d.page_content for d in docs], vectors, strict=True)),
+            self._embeddings,
+            metadatas=[d.metadata for d in docs],
+        )
         store.save_local(str(self._dir_for(repo)))
         return (
             f"Indexed {repo}: {n_files} files -> {len(docs)} chunks. "
