@@ -60,7 +60,8 @@ py-modules = [
     "config", "github_client", "rag", "retrieval", "server",
     "guardrails", "observability", "memory", "reflection",
     "agent_core", "multi_agent", "agent", "chat", "demo",
-    "runner", "streamlit_app", "api",
+    "runner", "streamlit_app", "api", "ratelimit",
+    "filetypes", "ci_logs", "pr_diff", "devops_schemas", "devops_tools",
 ]
 # The evaluation harness IS a package (evals/), unlike the flat modules.
 packages = ["evals"]
