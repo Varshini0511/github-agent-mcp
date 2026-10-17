@@ -10,6 +10,16 @@ import logging
 from fastmcp import FastMCP
 
 from config import configure_logging, get_settings
+from devops_tools import (
+    checks_overview,
+    ci_failure_report,
+    job_log_tail,
+    pr_diff_text,
+    pr_list,
+    pr_overview,
+    run_detail,
+    runs_overview,
+)
 from github_client import GitHubClient, GitHubError
 from rag import RepoIndex
 
@@ -107,6 +117,86 @@ def get_issue(repo: str, number: int) -> str:
         f"state: {i['state']}   labels: {labels}\n\n"
         f"{i.get('body') or '(no description)'}"
     )
+
+
+# --- CI/CD triage + PR review tools (read-only) -----------------------------------
+# Thin wrappers: the logic lives in devops_tools.py (unit-tested without the MCP
+# server). Needs a token with Actions: read and Checks: read; pull-request tools
+# need Pull requests: read. A missing permission comes back as a readable error.
+
+
+def _safe(label: str, fn, *args, **kwargs) -> str:
+    logger.info("%s %s", label, args)
+    try:
+        return fn(gh, *args, **kwargs)
+    except GitHubError as exc:
+        return f"Error: {exc}"
+
+
+@mcp.tool
+def get_ci_failure(repo: str, run_id: int = 0, branch: str = "") -> str:
+    """Diagnose a FAILED CI/CD run in ONE call: returns the failing jobs, the
+    shrunk log excerpt around the error, category hints and the workflow's recent
+    history (including a flakiness signal). Use this first for "why did the build
+    fail?". Raw logs are never returned -- they are huge.
+
+    repo: 'owner/name'. run_id: a specific run; leave 0 to use the most recent
+    FAILED run. branch: optionally restrict "most recent failed run" to a branch.
+    """
+    return _safe("get_ci_failure", ci_failure_report, repo, run_id, branch)
+
+
+@mcp.tool
+def list_workflow_runs(repo: str, status: str = "", branch: str = "") -> str:
+    """List recent GitHub Actions workflow runs, newest first.
+
+    repo: 'owner/name'. status: optional filter such as 'failure', 'success' or
+    'in_progress'. branch: optional branch name.
+    """
+    return _safe("list_workflow_runs", runs_overview, repo, status, branch)
+
+
+@mcp.tool
+def get_workflow_run(repo: str, run_id: int) -> str:
+    """Show one workflow run and each of its jobs with the failing steps."""
+    return _safe("get_workflow_run", run_detail, repo, run_id)
+
+
+@mcp.tool
+def get_job_log(repo: str, job_id: int, last_lines: int = 120) -> str:
+    """The last N cleaned lines of ONE job's log (default 120, max 400). Use only
+    for a closer look after get_ci_failure; job ids are shown in its output."""
+    return _safe("get_job_log", job_log_tail, repo, job_id, last_lines)
+
+
+@mcp.tool
+def list_check_runs(repo: str, ref: str) -> str:
+    """CI check results for a commit SHA, branch or tag: what passed, failed, is pending."""
+    return _safe("list_check_runs", checks_overview, repo, ref)
+
+
+@mcp.tool
+def list_pull_requests(repo: str, state: str = "open") -> str:
+    """List pull requests. state is 'open', 'closed' or 'all'."""
+    return _safe("list_pull_requests", pr_list, repo, state)
+
+
+@mcp.tool
+def get_pull_request(repo: str, number: int) -> str:
+    """Summary of one pull request: title, author, branches, size, description and
+    the CI status of its head commit. Read this before get_pr_diff."""
+    return _safe("get_pull_request", pr_overview, repo, number)
+
+
+@mcp.tool
+def get_pr_diff(repo: str, number: int, path: str = "") -> str:
+    """The changes in a pull request, ready to review. Lock files and generated
+    files are skipped; big diffs are trimmed and the output says what was left out.
+    The left column is the line number in the NEW file -- cite lines with it.
+
+    path: optionally a single changed file, to read its diff in full.
+    """
+    return _safe("get_pr_diff", pr_diff_text, repo, number, path)
 
 
 @mcp.tool

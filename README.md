@@ -19,9 +19,9 @@ A GitHub assistant built the way you would build one for production: an
 
 | Capability | How it works | Code |
 |---|---|---|
-| **MCP server** | 14 GitHub tools over stdio, reusable by any MCP client | `server.py` |
+| **MCP server** | 22 GitHub tools over stdio, reusable by any MCP client | `server.py` |
 | **Agent loop** | LangGraph model ⇄ tools; any chat model via one `CHAT_MODEL` string | `agent_core.py` |
-| **Multi-agent** | Supervisor routes to `repo_qa` / `issue_triage` / `code_writer` (scoped tools, own prompts) | `multi_agent.py` |
+| **Multi-agent** | Supervisor routes to `repo_qa` / `issue_triage` / `code_writer` / `ci_triage` / `pr_reviewer` (scoped tools, own prompts, structured outputs for the DevOps pair) | `multi_agent.py` |
 | **Hybrid RAG** | Chunk → embed → FAISS **+ BM25**, fused with Reciprocal Rank Fusion; identifier-aware weighting | `rag.py`, `retrieval.py` |
 | **Human-in-the-loop** | Writes freeze the graph at an `interrupt()`; approve/reject resumes it | `HumanInTheLoopMiddleware` |
 | **Guardrails** | Secret/PII redaction both ways; prompt-injection quarantine of tool output | `guardrails.py` |
@@ -102,11 +102,35 @@ read & write, then set `ALLOW_WRITES=true`. Every write still pauses for approva
 |---|---|
 | Read | `list_repo_files`, `read_file`, `read_file_lines`, `list_issues`, `get_issue` |
 | RAG | `index_repo`, `search_code` |
+| CI/CD (read-only) | `get_ci_failure` (one call: failed job + shrunk log excerpt + history), `list_workflow_runs`, `get_workflow_run`, `get_job_log`, `list_check_runs` |
+| Pull requests (read-only) | `list_pull_requests`, `get_pull_request`, `get_pr_diff` |
 | Write 🔒 | `create_issue`, `comment_on_issue`, `add_labels`, `create_branch`, `write_file`, `edit_file`, `open_pull_request` |
 | Agent-local | `write_todos` (progress checklist), `remember`, `recall` (long-term memory) |
 
 🔒 = needs `ALLOW_WRITES=true` **and** human approval. There is intentionally
 no tool to merge, delete, force-push or change repository settings.
+
+## DevOps agents (CI triage + PR review)
+
+In multi-agent mode two **read-only** specialists join the team:
+
+- `ci_triage` diagnoses a failed workflow run and returns a structured `CIReport`
+  (category, root cause, verbatim evidence, suggested fix, re-run advice, confidence).
+- `pr_reviewer` reviews a pull request and returns a structured `PRReview`
+  (risk, findings with file/line/quote, what was not reviewed, recommendation).
+
+Handoff example: *"PR 12 is failing - why, and is the change risky?"* runs
+`ci_triage` first and passes its diagnosis into `pr_reviewer`.
+
+Every evidence/finding quote is checked against what the tools actually returned
+and tagged `[verified]` or `[UNVERIFIED]`. Logs are shrunk to the failing step and
+diffs are budgeted with real new-file line numbers, so this fits free-tier limits.
+
+Limits (stated plainly): it **diagnoses, it does not fix or watch CI**. Nothing
+triggers it when a build fails (no webhook yet), and fixing still goes through
+`code_writer` with your approval. Tested offline against fake GitHub data only,
+not yet against a live provider. Token permissions needed in addition to the
+above: *Actions: read*, *Checks: read*, *Pull requests: read*.
 
 ## Observability
 

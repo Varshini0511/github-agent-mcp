@@ -33,6 +33,7 @@ from langchain_google_genai import GoogleGenerativeAIEmbeddings
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 from config import get_settings
+from filetypes import is_noise_file
 from github_client import GitHubClient
 from ratelimit import is_rate_limited, retry_delay_seconds
 from retrieval import BM25, looks_like_identifier, reciprocal_rank_fusion
@@ -123,28 +124,8 @@ class Hit:
     text: str
 
 
-# Files that are text but carry no signal for code search: dependency lock
-# files and generated/minified output. A single package-lock.json can produce
-# hundreds of chunks of hashes, burning embedding quota and drowning BM25 in
-# noise.
-_SKIP_NAMES = {
-    "package-lock.json",
-    "npm-shrinkwrap.json",
-    "yarn.lock",
-    "pnpm-lock.yaml",
-    "poetry.lock",
-    "Pipfile.lock",
-    "uv.lock",
-    "Cargo.lock",
-    "composer.lock",
-    "Gemfile.lock",
-    "go.sum",
-}
-_SKIP_SUFFIXES = (".min.js", ".min.css", ".map", ".lock")
-
-
 def _is_text(name: str) -> bool:
-    if name in _SKIP_NAMES or name.lower().endswith(_SKIP_SUFFIXES):
+    if is_noise_file(name):  # lock files, minified/generated output
         return False
     return Path(name).suffix.lower() in _TEXT_EXT or name in _TEXT_NAMES
 

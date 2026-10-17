@@ -21,7 +21,7 @@ over repos, **approval-gated writes**, **guardrails**, **usage metering**,
 
 ```powershell
 # tests — offline, no network, no keys needed beyond .env/dummies (~10 s)
-.\venv\Scripts\python.exe -m pytest -q            # expect: 110 passed, 1 skipped
+.\venv\Scripts\python.exe -m pytest -q            # expect: 163 passed, 1 skipped
 .\venv\Scripts\python.exe -m ruff check .         # lint
 .\venv\Scripts\python.exe -m ruff format .        # CI enforces `ruff format --check`
 
@@ -55,7 +55,7 @@ tests never use them for real (CI sets dummies).
 
 ### Module one-liners
 
-`config` validated settings · `github_client` retrying REST client · `server` MCP tools (14) ·
+`config` validated settings · `github_client` retrying REST client · `server` MCP tools (22) · `devops_tools`/`ci_logs`/`pr_diff`/`devops_schemas` CI + PR helpers ·
 `agent_core` assemble/send/resume/stream_turn + guard & retry middleware · `multi_agent` supervisor ·
 `guardrails` redaction + injection quarantine · `observability` usage/cost · `memory` long-term
 memory tools · `reflection` optional answer critic · `ratelimit` 429 helpers · `runner` sync↔async
@@ -120,8 +120,12 @@ free-tier limits.
 
 ## Current state
 
-- `master` is one commit ahead of `origin/master`: `46b2ff3` (indexing hardening +
-  retrieval measurement scripts) is **not pushed**. Ask the owner before pushing.
+- Local `master` is ahead of `origin/master` (indexing hardening, AGENTS.md, DevOps agents):
+  **not pushed**. Ask the owner before pushing.
+- **DevOps agents** (`ci_triage`, `pr_reviewer`; read-only, structured `CIReport`/`PRReview`
+  with quote grounding) are built and tested offline (163 tests). They diagnose only: no CI
+  trigger/webhook, no auto-fix loop. Backlog: webhook, ci_triage -> code_writer handoff with
+  a retry cap, evals on fixtures.
 - **Verified offline only:** streaming, long-term memory and reflection were tested against a
   scripted fake model, not yet against a live provider. Docker image build is untested
   (daemon was off). **CI is green on GitHub** (run on `f2f6265`: lint + tests on 3.11/3.12).

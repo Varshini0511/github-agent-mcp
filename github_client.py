@@ -197,6 +197,72 @@ class GitHubClient:
     def get_issue(self, repo: str, number: int) -> dict:
         return self.get(f"/repos/{repo}/issues/{number}").json()
 
+    # -- CI/CD (GitHub Actions) -- read-only ---------------------------------
+
+    def list_workflow_runs(
+        self, repo: str, status: str = "", branch: str = "", limit: int = 10
+    ) -> list[dict]:
+        """Recent workflow runs, newest first. ``status`` accepts a state
+        (``in_progress``) or a conclusion (``failure``, ``success``)."""
+        params: dict = {"per_page": max(1, min(limit, 100))}
+        if status:
+            params["status"] = status
+        if branch:
+            params["branch"] = branch
+        return self.get(f"/repos/{repo}/actions/runs", **params).json().get("workflow_runs", [])
+
+    def get_workflow_run(self, repo: str, run_id: int) -> dict:
+        return self.get(f"/repos/{repo}/actions/runs/{run_id}").json()
+
+    def list_run_jobs(self, repo: str, run_id: int) -> list[dict]:
+        return (
+            self.get(f"/repos/{repo}/actions/runs/{run_id}/jobs", per_page=100)
+            .json()
+            .get("jobs", [])
+        )
+
+    def get_job_logs(self, repo: str, job_id: int, max_chars: int = 2_000_000) -> str:
+        """Plain-text log of one job. GitHub answers with a redirect to a
+        short-lived download URL, which the Session follows (and, being a
+        different host, does not forward our token to). Only the TAIL is kept
+        when a log is enormous -- the failure is almost always at the end."""
+        resp = self.get(f"/repos/{repo}/actions/jobs/{job_id}/logs")
+        resp.encoding = "utf-8"
+        text = resp.text
+        return text[-max_chars:] if len(text) > max_chars else text
+
+    def list_check_runs(self, repo: str, ref: str) -> list[dict]:
+        """Check runs for a commit SHA / branch / tag."""
+        return (
+            self.get(f"/repos/{repo}/commits/{ref}/check-runs", per_page=100)
+            .json()
+            .get("check_runs", [])
+        )
+
+    # -- pull requests -- read-only ----------------------------------------------
+
+    def list_pull_requests(self, repo: str, state: str = "open", limit: int = 15) -> list[dict]:
+        return self.get(
+            f"/repos/{repo}/pulls", state=state, per_page=max(1, min(limit, 100))
+        ).json()
+
+    def get_pull_request(self, repo: str, number: int) -> dict:
+        return self.get(f"/repos/{repo}/pulls/{number}").json()
+
+    def list_pr_files(self, repo: str, number: int, max_files: int = 300) -> list[dict]:
+        """Changed files of a PR with their unified-diff ``patch`` text
+        (absent for binary or very large files). GitHub caps this at 3000
+        files; we stop at ``max_files`` to bound cost."""
+        files: list[dict] = []
+        page = 1
+        while len(files) < max_files:
+            batch = self.get(f"/repos/{repo}/pulls/{number}/files", per_page=100, page=page).json()
+            files.extend(batch)
+            if len(batch) < 100:
+                break
+            page += 1
+        return files[:max_files]
+
     def download_tarball(self, repo: str, ref: str = "") -> bytes:
         """Return the gzipped-tar bytes of a whole repository.
 
