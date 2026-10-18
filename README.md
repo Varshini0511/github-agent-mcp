@@ -126,11 +126,34 @@ Every evidence/finding quote is checked against what the tools actually returned
 and tagged `[verified]` or `[UNVERIFIED]`. Logs are shrunk to the failing step and
 diffs are budgeted with real new-file line numbers, so this fits free-tier limits.
 
-Limits (stated plainly): it **diagnoses, it does not fix or watch CI**. Nothing
-triggers it when a build fails (no webhook yet), and fixing still goes through
-`code_writer` with your approval. Tested offline against fake GitHub data only,
-not yet against a live provider. Token permissions needed in addition to the
-above: *Actions: read*, *Checks: read*, *Pull requests: read*.
+Limits (stated plainly): it **diagnoses, it does not fix**. Fixing still goes
+through `code_writer` with your approval. Tested offline against fake GitHub
+data only, not yet against a live provider. Token permissions needed in
+addition to the above: *Actions: read*, *Checks: read*, *Pull requests: read*.
+
+### Automatic triage on a failed build (webhook)
+
+`POST /webhooks/github` lets a failed GitHub Actions run trigger `ci_triage`
+**by itself**, so a diagnosis is waiting without anyone asking. It is built to
+be safe by default:
+
+- **Signed.** Every delivery is verified with an HMAC (`X-Hub-Signature-256`)
+  against `GITHUB_WEBHOOK_SECRET`; the endpoint returns 503 until that secret is
+  set, so an unsigned request can never trigger the agent.
+- **Filtered.** Only *completed, failed* `workflow_run` events act; successes,
+  in-progress runs and other event types are ignored.
+- **De-duplicated.** GitHub retries and manual re-deliveries are processed once.
+- **Capped.** `CI_AUTO_TRIAGE_MAX_PER_COMMIT` (default 2) stops a commit that
+  keeps failing from draining your quota.
+- **Opt-in and read-only.** `CI_AUTO_TRIAGE=false` by default only *records*
+  failures; set it `true` to auto-diagnose. **Fixing is never automatic** — it
+  still goes through `code_writer` with your approval.
+
+`GET /webhooks/ci` returns the recent auto-triage feed (what fired, what was
+diagnosed, what was capped). To go live you need a public URL for the API
+(GitHub must reach it) and a webhook on the repo pointing at `/webhooks/github`.
+Everything here is tested offline with a signed fake delivery and a stand-in
+triage runner; it has not yet run against a live GitHub delivery.
 
 ## Observability
 

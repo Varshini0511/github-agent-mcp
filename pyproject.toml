@@ -62,6 +62,7 @@ py-modules = [
     "agent_core", "multi_agent", "agent", "chat", "demo",
     "runner", "streamlit_app", "api", "ratelimit",
     "filetypes", "ci_logs", "pr_diff", "devops_schemas", "devops_tools",
+    "webhook",
 ]
 # The evaluation harness IS a package (evals/), unlike the flat modules.
 packages = ["evals"]

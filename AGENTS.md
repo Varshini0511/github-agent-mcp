@@ -123,9 +123,15 @@ free-tier limits.
 - Local `master` is ahead of `origin/master` (indexing hardening, AGENTS.md, DevOps agents):
   **not pushed**. Ask the owner before pushing.
 - **DevOps agents** (`ci_triage`, `pr_reviewer`; read-only, structured `CIReport`/`PRReview`
-  with quote grounding) are built and tested offline (163 tests). They diagnose only: no CI
-  trigger/webhook, no auto-fix loop. Backlog: webhook, ci_triage -> code_writer handoff with
-  a retry cap, evals on fixtures.
+  with quote grounding) are built and tested offline. They diagnose only — no auto-fix.
+- **CI webhook** (`webhook.py` + `POST /webhooks/github` in `api.py`): a failed `workflow_run`
+  can auto-trigger `ci_triage`. HMAC-verified (`GITHUB_WEBHOOK_SECRET`; 503 until set),
+  de-duplicated per delivery, capped per commit (`CI_AUTO_TRIAGE_MAX_PER_COMMIT`), opt-in
+  (`CI_AUTO_TRIAGE`, default off). Read-only; fixing still needs human-approved `code_writer`.
+  `GET /webhooks/ci` is the activity feed. Offline-tested only (signed fake delivery + stand-in
+  runner); never hit by a live GitHub delivery. 179 tests total.
+- Backlog: ci_triage -> code_writer auto-fix handoff (still approval-gated) with a retry cap;
+  DevOps/webhook evals on fixtures; live-delivery smoke test.
 - **Verified offline only:** streaming, long-term memory and reflection were tested against a
   scripted fake model, not yet against a live provider. Docker image build is untested
   (daemon was off). **CI is green on GitHub** (run on `f2f6265`: lint + tests on 3.11/3.12).

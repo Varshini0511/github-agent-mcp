@@ -9,6 +9,8 @@ POST /chat                one turn, JSON in / JSON out
 POST /chat/stream         one turn as an SSE stream (tokens, tool events, final)
 POST /resume              answer a pending approval (approve / reject)
 GET  /usage[/{thread}]    token / cost / latency totals
+POST /webhooks/github     HMAC-signed CI webhook; a failed run can auto-triage
+GET  /webhooks/ci         recent auto-triage activity feed
 
 Security model (this API can act on GitHub with YOUR token -- so it is
 locked down by default):
@@ -45,11 +47,23 @@ from config import get_settings
 from multi_agent import build_supervisor
 from observability import TRACKER
 from runner import AgentWorker, AsyncRunner
+from webhook import (
+    AttemptLimiter,
+    DeliveryLog,
+    Diagnosis,
+    DiagnosisStore,
+    WorkflowFailure,
+    parse_workflow_failure,
+    verify_signature,
+)
 
 logger = logging.getLogger("github-agent.api")
 
 ID_PATTERN = r"^[A-Za-z0-9_.:\-]{1,64}$"
 LOOPBACK = {"127.0.0.1", "::1", "localhost", "testclient"}
+# GitHub's workflow_run payloads are a few KB; cap well above that and reject
+# anything larger unread rather than buffering it.
+WEBHOOK_MAX_BYTES = 2_000_000
 
 
 # --- request / response models -----------------------------------------------
@@ -105,12 +119,24 @@ def create_app(
     *,
     api_key: str | None = None,
     rate_limit_per_min: int | None = None,
+    webhook_secret: str | None = None,
+    auto_triage: bool | None = None,
+    max_attempts_per_commit: int | None = None,
+    triage_runner: Callable | None = None,
+    await_triage: bool = False,
 ) -> FastAPI:
     """Build the FastAPI app.
 
     ``builders`` maps mode -> async-context-manager factory yielding an agent;
     it defaults to the real ``build_agent`` / ``build_supervisor`` and exists
     so tests can inject a fake-model agent without touching the network.
+
+    The webhook knobs (``webhook_secret``, ``auto_triage``,
+    ``max_attempts_per_commit``) default to the configured settings. A test
+    passes ``triage_runner`` (an ``async (WorkflowFailure) -> str``) to stand in
+    for a live model run, and ``await_triage=True`` to run that triage inline so
+    the result is observable without racing a background task; in production the
+    triage runs as a fire-and-forget task so the webhook answers GitHub fast.
     """
     settings = get_settings()
     builders = builders or {"single": build_agent, "multi": build_supervisor}
@@ -120,6 +146,25 @@ def create_app(
         else (settings.api_key.get_secret_value() if settings.api_key else None)
     )
     limiter = SlidingWindowLimiter(rate_limit_per_min or settings.api_rate_limit_per_min)
+
+    wh_secret = (
+        webhook_secret
+        if webhook_secret is not None
+        else (
+            settings.github_webhook_secret.get_secret_value()
+            if settings.github_webhook_secret
+            else None
+        )
+    )
+    auto_triage = settings.ci_auto_triage if auto_triage is None else auto_triage
+    cap = (
+        settings.ci_auto_triage_max_per_commit
+        if max_attempts_per_commit is None
+        else max_attempts_per_commit
+    )
+    deliveries = DeliveryLog()
+    attempts = AttemptLimiter(cap)
+    diagnoses = DiagnosisStore()
 
     state: dict = {"runner": None, "workers": {}}
     worker_lock = threading.Lock()
@@ -198,6 +243,8 @@ def create_app(
             "reflection": s.enable_reflection,
             "hybrid_retrieval": s.rag_hybrid,
             "auth": "api-key" if key else "loopback-only",
+            "webhook": "enabled" if wh_secret else "disabled",
+            "auto_triage": auto_triage,
         }
 
     @app.post("/chat")
@@ -249,6 +296,83 @@ def create_app(
                 yield {"event": "error", "data": json.dumps({"detail": type(exc).__name__})}
 
         return EventSourceResponse(events())
+
+    # -- CI webhook: a failed run can trigger the agent by itself -----------
+
+    async def _default_triage(failure: WorkflowFailure) -> str:
+        """Ask the DevOps team (ci_triage) to diagnose the failed run.
+
+        Read-only: this reaches get_ci_failure and reports a cause. It never
+        reaches a write tool, so nothing is changed on the repo without the
+        separate, human-approved code_writer path.
+        """
+        worker = await ready_worker("multi")
+        thread = ("ci-" + failure.repo.replace("/", "-") + "-" + str(failure.run_id))[:64]
+        cfg = _config(thread, "ci-webhook")
+        prompt = (
+            f"The CI workflow '{failure.workflow}' failed for {failure.repo} "
+            f"(run {failure.run_id}, branch {failure.branch}). Use get_ci_failure "
+            f"to find why it failed, then summarise the root cause and a suggested fix."
+        )
+        step = await run_in_threadpool(worker.call, lambda agent: send(agent, cfg, prompt))
+        return step.get("content", "")
+
+    run_triage = triage_runner or _default_triage
+
+    @app.post("/webhooks/github")
+    async def github_webhook(request: Request):
+        # No X-API-Key here: GitHub can't send one. The HMAC signature IS the
+        # authentication, so the endpoint is disabled until a secret is set.
+        if not wh_secret:
+            raise HTTPException(
+                status_code=503,
+                detail="Webhook endpoint is disabled: set GITHUB_WEBHOOK_SECRET.",
+            )
+        body = await request.body()
+        if len(body) > WEBHOOK_MAX_BYTES:
+            raise HTTPException(status_code=413, detail="Payload too large.")
+        if not verify_signature(wh_secret, body, request.headers.get("x-hub-signature-256")):
+            raise HTTPException(status_code=401, detail="Invalid or missing signature.")
+
+        event = request.headers.get("x-github-event", "")
+        if event == "ping":  # GitHub sends this once when the hook is created
+            return {"status": "pong"}
+        if deliveries.seen_before(request.headers.get("x-github-delivery", "")):
+            return {"status": "duplicate"}
+        try:
+            payload = json.loads(body)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail="Body is not valid JSON.") from exc
+
+        failure = parse_workflow_failure(event, payload if isinstance(payload, dict) else {})
+        if failure is None:
+            return {"status": "ignored", "event": event}
+        if not auto_triage:
+            diagnoses.add(Diagnosis(failure, "skipped-disabled", "CI_AUTO_TRIAGE is off."))
+            return {"status": "noted", "detail": "auto-triage disabled"}
+        if not attempts.take(failure.commit_key):
+            diagnoses.add(
+                Diagnosis(failure, "skipped-cap", f"Reached {cap} triage attempts for this commit.")
+            )
+            return {"status": "attempt-limit-reached", "commit": failure.head_sha[:7]}
+
+        async def _job() -> None:
+            try:
+                text = await run_triage(failure)
+                diagnoses.add(Diagnosis(failure, "diagnosed", (text or "")[:4000]))
+            except Exception as exc:  # a failed triage must not crash the webhook
+                logger.exception("auto-triage failed for %s run %s", failure.repo, failure.run_id)
+                diagnoses.add(Diagnosis(failure, "error", type(exc).__name__))
+
+        if await_triage:
+            await _job()
+        else:
+            asyncio.create_task(_job())
+        return {"status": "accepted", "repo": failure.repo, "run_id": failure.run_id}
+
+    @app.get("/webhooks/ci")
+    async def webhook_diagnoses(_who: str = Depends(guard), limit: int = 20):
+        return {"diagnoses": diagnoses.recent(limit)}
 
     @app.get("/usage")
     async def usage_overall(_who: str = Depends(guard)):

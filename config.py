@@ -115,6 +115,20 @@ class Settings(BaseSettings):
     api_key: SecretStr | None = Field(None, alias="API_KEY")
     api_rate_limit_per_min: int = Field(30, alias="API_RATE_LIMIT_PER_MIN")
 
+    # --- CI webhook / auto-triage (api.py) ---------------------------------
+    # GitHub signs every webhook delivery with this secret; the /webhooks/github
+    # endpoint stays disabled (503) until it is set, so an unsigned request can
+    # never trigger the agent.
+    github_webhook_secret: SecretStr | None = Field(None, alias="GITHUB_WEBHOOK_SECRET")
+    # OFF by default: when a CI run fails, should the agent diagnose it on its
+    # own (one model run per failure)? Leave False to only RECORD failures; flip
+    # to True to auto-diagnose. Fixing is never automatic -- it still goes
+    # through code_writer with human approval.
+    ci_auto_triage: bool = Field(False, alias="CI_AUTO_TRIAGE")
+    # Hard cap on automatic triage runs per commit, so a commit that keeps
+    # failing (or a delivery GitHub keeps retrying) cannot drain the quota.
+    ci_auto_triage_max_per_commit: int = Field(2, alias="CI_AUTO_TRIAGE_MAX_PER_COMMIT")
+
     # --- Observability ----------------------------------------------
     log_level: str = Field("INFO", alias="LOG_LEVEL")
     # Optional JSON overrides for the cost estimator, USD per 1M tokens:
