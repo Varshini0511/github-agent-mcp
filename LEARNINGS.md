@@ -13,6 +13,9 @@ says where, so each claim is checkable. Grouped by the problem it solves.
 | **Supervisor / multi-agent** | A manager delegates to scoped specialists; each sees only the tools it needs | `multi_agent.assemble_supervisor` |
 | **Agent-as-tool** | A whole agent wrapped so the manager sees it as one tool (`task in → text out`) | `multi_agent._wrap` |
 | **Task decomposition** | An explicit checklist (`write_todos`) stops a weak model repeating finished work | `TodoListMiddleware` |
+| **Agent handoff** | One specialist's output becomes the next one's input (CI diagnosis → PR review) | `multi_agent.SUPERVISOR_PROMPT` |
+| **Structured output** | The final answer is a validated Pydantic object (via `ToolStrategy`), not free text | `devops_schemas.py`, `multi_agent._make_specialist` |
+| **Event-driven agent** | A webhook, not a person, starts the run | `webhook.py`, `api.py` `/webhooks/github` |
 | **Middleware pattern** | Cross-cutting behaviour wrapped around model / tool calls, composable and orderable | `agent_core.assemble_agent` |
 
 ## Memory & context
@@ -30,6 +33,7 @@ says where, so each claim is checkable. Grouped by the problem it solves.
 |---|---|---|
 | **Chunking + embeddings + vector search** | Split code, embed, retrieve by meaning with `path:line` citations | `rag.RepoIndex` |
 | **Lexical search (BM25)** | Exact-term ranking with an identifier-aware tokenizer | `retrieval.BM25` |
+| **Context shrinking** | A multi-megabyte CI log is cut to the failing step; a PR diff is budgeted and ordered by importance | `ci_logs.extract_failure`, `pr_diff.render_pr_diff` |
 | **Hybrid retrieval** | Run both retrievers and fuse; each covers the other's blind spot | `rag.RepoIndex.search` |
 | **Reciprocal Rank Fusion** | Combine rankings from incomparable scorers using ranks only | `retrieval.reciprocal_rank_fusion` |
 | **Weighted fusion** | Trust the keyword leg more for code-shaped queries; breaks ties | `retrieval.looks_like_identifier` |
@@ -42,6 +46,11 @@ says where, so each claim is checkable. Grouped by the problem it solves.
 | **Secret & PII redaction** | Credentials never reach the model or chat history; Luhn-checked card detection | `guardrails.py` |
 | **Least privilege / defence in depth** | Hard switch + approval gate + no destructive tools | `server._guard`, `WRITE_TOOLS` |
 | **Fail-open safety nets** | Reflection may never turn a good answer into an error | `reflection.critique` |
+| **Grounding / claim verification** | Every quoted log or diff line is checked against the tool output and tagged `[verified]` or `[UNVERIFIED]` | `devops_schemas.quote_is_grounded` |
+| **Webhook authentication (HMAC)** | A shared secret signs the body; verify with a constant-time compare | `webhook.verify_signature` |
+| **Idempotency** | A redelivered event is handled once | `webhook.DeliveryLog` |
+| **Circuit breaker / attempt cap** | An automatic loop gets a hard ceiling so it cannot burn quota | `webhook.AttemptLimiter` |
+| **Safe-by-default automation** | Auto-triage is opt-in and read-only; fixing stays human-approved | `CI_AUTO_TRIAGE` |
 | **Self-reflection** | A critic fact-checks the draft against tool evidence; one bounded revision | `reflection.py`, `agent_core.send` |
 
 ## Reliability
@@ -97,6 +106,11 @@ says where, so each claim is checkable. Grouped by the problem it solves.
   code-shaped queries fixed it. Tests found a real ranking flaw.
 * *A phone-number regex chopped a 16-digit number in two* → added boundary
   look-arounds; redaction must never leave fragments behind.
+* *CI went red on a push even though every test passed locally* → the project is
+  installed as a package in CI, and new modules were missing from the
+  `py-modules` list in `pyproject.toml`; they imported fine from the working
+  directory. A test now fails whenever a packaged module imports an unpackaged
+  one. "Works on my machine" is a real category of bug.
 * *The free tier's limits shaped the design* — token-frugal tools
   (`read_file_lines`, `edit_file`), rate-limit-aware retries and a usage meter
   all exist because the constraint was real.

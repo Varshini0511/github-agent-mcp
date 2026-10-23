@@ -30,6 +30,7 @@ flowchart TB
         T1[read tools<br/>list · read · read_lines · issues]
         T2[RAG tools<br/>index_repo · search_code]
         T3[write tools<br/>branch · edit · write · issue · PR]
+        T4[CI / PR tools, read-only<br/>get_ci_failure · get_pr_diff · checks · runs]
     end
 
     subgraph Backends
@@ -41,7 +42,7 @@ flowchart TB
 
     UI & API & CLI --> Core
     AG -- MCP over stdio --> Tools
-    T1 & T3 --> GH
+    T1 & T3 & T4 --> GH
     T2 --> VEC
     T2 --> EMB
     AG --> LLM
@@ -95,20 +96,56 @@ Key properties:
 
 | Module | Responsibility |
 |---|---|
-| `server.py` | MCP server: 14 tools, thin wrappers that turn errors into model-readable strings |
+| `server.py` | MCP server: 22 tools, thin wrappers that turn errors into model-readable strings |
 | `github_client.py` | Resilient REST client: pooled session, retry + backoff + jitter, rate-limit handling, error taxonomy |
 | `rag.py` / `retrieval.py` | Index a repo (chunk → embed → FAISS); hybrid search = dense + BM25 fused with RRF |
 | `agent_core.py` | `assemble_agent` (graph + middleware), `send` / `resume` / `stream_turn`, usage + guardrail reporting |
-| `multi_agent.py` | Supervisor + 3 scoped specialists ("agent as tool") |
+| `multi_agent.py` | Supervisor + 5 scoped specialists ("agent as tool"); `ci_triage` and `pr_reviewer` return structured reports |
+| `devops_tools.py` | Pure functions behind the CI / PR tools: run overview, one-call CI failure report, PR overview and diff |
+| `ci_logs.py` | Shrinks a raw Actions log to the failing step; heuristic failure-category hints |
+| `pr_diff.py` | Re-numbers a patch with real new-file line numbers; budgets and orders files (source > tests > docs) |
+| `devops_schemas.py` | `CIReport` / `PRReview` (Pydantic) and the quote-grounding check |
+| `filetypes.py` | One definition of "noise" files (lockfiles, minified) shared by indexing and PR review |
+| `webhook.py` | Pure core of the CI webhook: HMAC check, event parsing, delivery de-dup, per-commit cap, activity log |
 | `guardrails.py` | Secret / PII redaction, prompt-injection detection + quarantine (pure functions) |
 | `observability.py` | Per-turn tokens, latency, tool calls, estimated cost; structured JSON log lines |
 | `memory.py` | Long-term memory tools (`remember` / `recall`) over a LangGraph Store |
 | `reflection.py` | Optional critic that fact-checks an answer against tool evidence; fails open |
 | `runner.py` | Bridges sync front-ends to the async agent (`AsyncRunner`, `AgentWorker`) |
-| `api.py` | FastAPI app: `/chat`, `/chat/stream` (SSE), `/resume`, `/usage`, `/health` |
+| `api.py` | FastAPI app: `/chat`, `/chat/stream` (SSE), `/resume`, `/usage`, `/health`, `/webhooks/github`, `/webhooks/ci` |
 | `streamlit_app.py` | Web UI |
 | `evals/` | Golden set + deterministic checks + LLM-as-judge |
 | `config.py` | Validated, fail-fast settings; secrets are `SecretStr` |
+
+## 3a. DevOps agents and the CI webhook
+
+Two **read-only** specialists join the supervisor's team. Neither holds a write
+tool; the invariant is tested (`tests/test_devops_agents.py`).
+
+```mermaid
+flowchart LR
+    GHA[GitHub Actions run fails] -- workflow_run event --> WH[POST /webhooks/github]
+    WH --> V{HMAC valid?<br/>failed run?<br/>new delivery?<br/>under cap?}
+    V -- no --> X[ignore / 401 / duplicate / capped]
+    V -- yes --> CT[ci_triage specialist]
+    U[User asks in chat] --> SUP[Supervisor] --> CT
+    SUP -- passes diagnosis --> PR[pr_reviewer specialist]
+    CT --> R1[CIReport + quote check]
+    PR --> R2[PRReview + quote check]
+    R1 --> FEED[GET /webhooks/ci feed]
+    R1 -. human asks for a fix .-> CW[code_writer<br/>approval-gated]
+```
+
+* **Two ways in, one specialist.** A person asks in chat, or the webhook fires
+  on a failed run. Both end in the same `ci_triage` agent.
+* **Structured, then verified.** A specialist's final answer is a Pydantic
+  report. Each evidence quote is checked against what the tools actually
+  returned and tagged `[verified]` or `[UNVERIFIED]`.
+* **Token-frugal tools.** `get_ci_failure` does the whole investigation in one
+  call (failed job, a shrunk log excerpt, history, a flakiness signal) because
+  raw logs are megabytes and the free tier allows a handful of calls a minute.
+* **Diagnosis never becomes a fix on its own.** Fixing goes through
+  `code_writer`, which is still approval-gated. The webhook path is read-only.
 
 ## 4. Design decisions and trade-offs
 
@@ -123,6 +160,9 @@ Key properties:
 | **Reflection is opt-in and fails open** | It costs a model call and must never turn a good answer into an error | Off by default, so hallucination checking is a deliberate choice |
 | **Offline test seam (`assemble_agent`)** | The *real* graph runs against a scripted fake model: tool loop, interrupts, guardrails and streaming are tested for free, deterministically | The fake proves wiring, not model quality — that is the evals' job |
 | **Cost shown as an *estimate*** | Gives scale on free tiers where the real bill is $0 | List prices drift; overridable via `MODEL_PRICES_JSON` |
+| **Structured output + quote grounding** for DevOps reports | A report is testable and machine-readable, and an invented log line is visible as `[UNVERIFIED]` | Grounding proves a quote exists in the tool output, not that the conclusion drawn from it is right |
+| **Webhook is HMAC-authenticated, opt-in, capped** | An endpoint that triggers a model on external events can drain quota or be forged; the signature, the off-by-default switch and the per-commit cap each bound a different risk | The cap and de-dup log are in-memory: they reset on restart and are per-process |
+| **Auto-triage but never auto-fix** | Diagnosis is read-only and safe to automate; a model's guessed commit is not | A human is still in the loop for every repair |
 
 ## 5. Failure modes the design anticipates
 
@@ -138,6 +178,10 @@ Key properties:
 | GitHub 5xx / network blip | Retry with exponential backoff + jitter |
 | Context window overflow | Summarisation middleware keeps recent turns verbatim |
 | Process restart | Conversation + long-term memory persisted in SQLite |
+| Huge CI log or PR diff | `ci_logs.extract_failure` and `pr_diff.render_pr_diff` shrink to the cause / a size budget and say what was omitted |
+| Forged or replayed webhook | HMAC signature check; delivery-id de-duplication |
+| A commit that keeps failing | Per-commit cap on automatic triage (`CI_AUTO_TRIAGE_MAX_PER_COMMIT`) |
+| Checks permission missing on the token | PR overview degrades to `CI: unavailable (...)` instead of failing |
 
 ## 6. Scaling notes (what would change in production)
 

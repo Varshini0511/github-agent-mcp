@@ -8,7 +8,7 @@ how to run it, where things live, and the traps that already cost hours.
 ## What this is
 
 **GitHub Agent** — a GitHub assistant: an **MCP tool server** (`server.py`) +
-a **LangGraph agent** (single, or supervisor + 3 specialists), **hybrid RAG**
+a **LangGraph agent** (single, or supervisor + 5 specialists), **hybrid RAG**
 over repos, **approval-gated writes**, **guardrails**, **usage metering**,
 **evals**, and two front-ends (Streamlit UI, FastAPI/SSE API).
 
@@ -21,7 +21,7 @@ over repos, **approval-gated writes**, **guardrails**, **usage metering**,
 
 ```powershell
 # tests — offline, no network, no keys needed beyond .env/dummies (~10 s)
-.\venv\Scripts\python.exe -m pytest -q            # expect: 163 passed, 1 skipped
+.\venv\Scripts\python.exe -m pytest -q            # expect: 179 passed, 1 skipped
 .\venv\Scripts\python.exe -m ruff check .         # lint
 .\venv\Scripts\python.exe -m ruff format .        # CI enforces `ruff format --check`
 
@@ -47,6 +47,9 @@ tests never use them for real (CI sets dummies).
 | Change agent behaviour / prompt | `SYSTEM_PROMPT` in `agent_core.py`; specialist prompts in `multi_agent.py` |
 | Add middleware | `assemble_agent` (agent_core) / `assemble_supervisor` (multi_agent) — **order matters** |
 | Add a setting | `config.py` Field → `.env.example` → README config table |
+| Add a root `.py` module | also add it to `py-modules` in `pyproject.toml` (CI installs a package; an omission only fails there) |
+| Change CI triage / PR review | `devops_tools.py`, `ci_logs.py`, `pr_diff.py`, `devops_schemas.py`; tests in `tests/test_devops_*.py`, `test_ci_logs.py`, `test_pr_diff.py` |
+| Change the CI webhook | `webhook.py` (pure core) + `/webhooks/*` in `api.py` → `tests/test_webhook.py` |
 | Guardrail rule | `guardrails.py` + `tests/test_guardrails.py` |
 | Retrieval | `retrieval.py` (pure BM25/RRF) · `rag.py` (index + search) |
 | HTTP endpoint | `api.py` + `tests/test_api.py` |
@@ -120,8 +123,8 @@ free-tier limits.
 
 ## Current state
 
-- Local `master` is ahead of `origin/master` (indexing hardening, AGENTS.md, DevOps agents):
-  **not pushed**. Ask the owner before pushing.
+- `master` is pushed and in sync with `origin/master`; CI is green. Ask the owner before any
+  further push.
 - **DevOps agents** (`ci_triage`, `pr_reviewer`; read-only, structured `CIReport`/`PRReview`
   with quote grounding) are built and tested offline. They diagnose only — no auto-fix.
 - **CI webhook** (`webhook.py` + `POST /webhooks/github` in `api.py`): a failed `workflow_run`
@@ -134,7 +137,9 @@ free-tier limits.
   DevOps/webhook evals on fixtures; live-delivery smoke test.
 - **Verified offline only:** streaming, long-term memory and reflection were tested against a
   scripted fake model, not yet against a live provider. Docker image build is untested
-  (daemon was off). **CI is green on GitHub** (run on `f2f6265`: lint + tests on 3.11/3.12).
+  (daemon was off). **CI is green on GitHub** (lint + tests on 3.11/3.12). CI installs the
+  project as a package, so a new root module MUST be added to `py-modules` in `pyproject.toml`
+  (a test, `tests/test_packaging.py`, fails if one is missing).
 - A Streamlit Community Cloud deployment exists (secrets set there).
 - No `LICENSE` file yet.
 

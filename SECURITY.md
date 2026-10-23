@@ -28,6 +28,12 @@ that holds credentials and takes actions on a user's behalf.
 | T9 | **Secrets committed to git** | `.env` ignored, `.env.example` placeholders only, secret scanning friendly test fixtures | `.gitignore` |
 | T10 | **Cross-user memory leakage** | Long-term memory namespaced by `user_id`; conversations by `thread_id` | `memory.py` |
 | T11 | **Dangerous operations** | There is deliberately **no** tool for merge, delete, force-push or settings changes | `server.py` tool list |
+| T12 | **Forged webhook** — someone POSTs a fake "CI failed" event to make the agent spend quota or act | Every delivery must carry a valid `X-Hub-Signature-256` HMAC (constant-time compare). The endpoint returns 503 until `GITHUB_WEBHOOK_SECRET` is set, so it can never run unauthenticated | `webhook.verify_signature`, `api.py` |
+| T13 | **Replay / retry storm** — GitHub redelivers, or a commit keeps failing, and each event fires the model | Delivery-id de-duplication, plus a hard per-commit cap (`CI_AUTO_TRIAGE_MAX_PER_COMMIT`, default 2). Auto-triage is **off** unless `CI_AUTO_TRIAGE=true` | `webhook.DeliveryLog`, `webhook.AttemptLimiter` |
+| T14 | **Automation turns a mistake into a repo change** | The webhook path is read-only: `ci_triage` and `pr_reviewer` hold no write tool (asserted by a test). Fixes still need `code_writer` and a human approval | `multi_agent._SPECIALIST_TOOLS`, `tests/test_devops_agents.py` |
+| T15 | **Injection via CI logs or PR diffs** — a log line or a changed file says "ignore your instructions" | Same tool-output guard as every other tool result; the specialists run it too | `make_tool_output_guard` |
+| T16 | **Hallucinated evidence in a report** | Each quoted log line / diff line is checked against the tool output and marked `[UNVERIFIED]` if absent | `devops_schemas.quote_is_grounded` |
+| T17 | **Oversized webhook body** | Bodies over 2 MB are rejected unread (413) | `api.WEBHOOK_MAX_BYTES` |
 
 ## Known limitations (be honest about them)
 
@@ -43,6 +49,17 @@ that holds credentials and takes actions on a user's behalf.
   `ALLOW_WRITES=false` on any public instance.
 * **PII redaction can over-redact** (e.g. a maintainer's email in a README).
   Disable with `GUARDRAILS_REDACT_PII=false` when that is not wanted.
+* **Webhook state is in memory.** The de-dup log and per-commit cap reset when
+  the process restarts and are not shared between workers, so a restart can
+  re-allow a capped commit. Use a shared store before running several workers.
+* **A verified quote is not a verified conclusion.** The grounding check proves
+  a quoted line exists in the tool output; it cannot prove the diagnosis drawn
+  from it is right. Treat a diagnosis as a strong lead, not a verdict.
+* **The webhook has only been exercised with signed fake deliveries.** It has
+  not yet received a real GitHub delivery, and it needs a publicly reachable
+  URL (and a hosted API) before it can.
+* **The webhook secret is a single shared secret.** Rotate it if it leaks, and
+  never commit it; it belongs in the environment, like the other keys.
 
 ## Reporting
 
