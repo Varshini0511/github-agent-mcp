@@ -20,9 +20,12 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import os
 import re
+import sys
 from pathlib import Path
 
+from fastmcp.client.transports import PythonStdioTransport
 from langchain.agents import create_agent
 from langchain.agents.middleware import (
     HumanInTheLoopMiddleware,
@@ -68,6 +71,24 @@ WRITE_TOOLS = (
 
 # The MCP server lives next to this file; MCPAdapter launches it over stdio.
 SERVER_PATH = Path(__file__).with_name("server.py")
+
+
+def server_transport() -> PythonStdioTransport:
+    """How to launch the bundled MCP server: this interpreter, this environment.
+
+    The MCP stdio client otherwise starts the server with only a small
+    allow-list of variables (PATH, HOME, ...). Settings supplied through the
+    environment -- ``docker run --env-file``, CI secrets, a per-run
+    ``CHAT_MODEL`` or ``RAG_HYBRID`` -- then never reach the tools, which fall
+    back to whatever ``.env`` sits next to server.py. Inside the Docker image
+    there is none, so the server could not even find ``GITHUB_TOKEN``.
+    """
+    return PythonStdioTransport(SERVER_PATH, python_cmd=sys.executable, env=dict(os.environ))
+
+
+def mcp_server() -> MCPAdapter:
+    """Connect to the bundled MCP server (use as ``async with mcp_server() as mcp``)."""
+    return MCPAdapter(server_transport())
 
 
 def _is_malformed_tool_call(exc: BaseException) -> bool:
@@ -372,7 +393,7 @@ async def build_agent():
     store_path = Path(settings.memory_db).resolve()
 
     async with (
-        MCPAdapter(SERVER_PATH) as mcp,
+        mcp_server() as mcp,
         AsyncSqliteSaver.from_conn_string(str(db_path)) as checkpointer,
         AsyncSqliteStore.from_conn_string(str(store_path)) as store,
     ):

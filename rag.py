@@ -167,13 +167,30 @@ class RepoIndex:
         self._max_file_bytes = s.rag_max_file_bytes
         self._hybrid = s.rag_hybrid
         self._candidates = s.rag_candidates
-        self._embeddings = GoogleGenerativeAIEmbeddings(model=s.embedding_model)
+        self._embedding_model = s.embedding_model
+        self._embeddings_client = None  # built on first use, see _embeddings
         self._splitter = RecursiveCharacterTextSplitter(
             chunk_size=s.rag_chunk_size,
             chunk_overlap=s.rag_chunk_overlap,
             add_start_index=True,  # puts a char offset in each chunk's metadata
         )
         self._gh = GitHubClient()
+
+    @property
+    def _embeddings(self):
+        """The embedding client, created on first use.
+
+        Only index_repo / search_code need it. Building it eagerly made the
+        whole MCP server -- all 22 tools -- refuse to start without
+        GOOGLE_API_KEY, although the setting is optional.
+        """
+        if self._embeddings_client is None:
+            self._embeddings_client = GoogleGenerativeAIEmbeddings(model=self._embedding_model)
+        return self._embeddings_client
+
+    @_embeddings.setter
+    def _embeddings(self, client) -> None:
+        self._embeddings_client = client
 
     # -- paths --------------------------------------------------------
 

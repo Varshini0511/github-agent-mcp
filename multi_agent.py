@@ -28,7 +28,6 @@ from langchain.agents.middleware import (
 )
 from langchain.agents.structured_output import ToolStrategy
 from langchain.chat_models import init_chat_model
-from langchain.mcp import MCPAdapter
 from langchain_core.messages import ToolMessage
 from langchain_core.tools import tool
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
@@ -37,14 +36,13 @@ from langgraph.store.sqlite.aio import AsyncSqliteStore
 from agent_core import (
     content_to_text,
     make_tool_output_guard,
+    mcp_server,
     retry_malformed_tool_call,
     retry_on_rate_limit,
 )
 from config import configure_logging, get_settings
 from devops_schemas import CIReport, PRReview
 from memory import build_memory_tools
-
-SERVER_PATH = Path(__file__).with_name("server.py")
 
 # Which MCP tools each specialist is allowed to see.
 _SPECIALIST_TOOLS = {
@@ -302,7 +300,7 @@ async def build_supervisor():
     store_path = Path(settings.memory_db).resolve()
 
     async with (
-        MCPAdapter(SERVER_PATH) as mcp,
+        mcp_server() as mcp,
         AsyncSqliteSaver.from_conn_string(str(db_path)) as checkpointer,
         AsyncSqliteStore.from_conn_string(str(store_path)) as store,
     ):
