@@ -35,7 +35,7 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 from config import get_settings
 from filetypes import is_noise_file
 from github_client import GitHubClient
-from ratelimit import is_rate_limited, retry_delay_seconds
+from ratelimit import retry_delay_seconds, should_retry
 from retrieval import BM25, looks_like_identifier, reciprocal_rank_fusion
 
 logger = logging.getLogger(__name__)
@@ -219,7 +219,7 @@ class RepoIndex:
                     vectors.extend(self._embeddings.embed_documents(chunk))
                     break
                 except Exception as exc:
-                    if not is_rate_limited(exc) or attempt == max_attempts:
+                    if not should_retry(exc) or attempt == max_attempts:
                         raise
                     wait = retry_delay_seconds(exc)
                     logger.warning(

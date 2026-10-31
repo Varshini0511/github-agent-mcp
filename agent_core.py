@@ -51,7 +51,7 @@ from guardrails import (
 )
 from memory import build_memory_tools
 from observability import TRACKER, UsageCallback, log_turn, resolve_prices
-from ratelimit import is_rate_limited, retry_delay_seconds
+from ratelimit import is_daily_quota, retry_delay_seconds, should_retry
 from reflection import critique, revision_prompt
 
 logger = logging.getLogger("github-agent.core")
@@ -184,7 +184,11 @@ async def retry_on_rate_limit(request, handler):
             return await handler(request)
         except Exception as exc:
             attempts += 1
-            if not is_rate_limited(exc) or attempts >= max_attempts:
+            if is_daily_quota(exc):
+                logger.error(
+                    "Daily quota for the model is used up; not retrying: %s", str(exc)[:300]
+                )
+            if not should_retry(exc) or attempts >= max_attempts:
                 raise
             wait = retry_delay_seconds(exc)
             logger.warning(
