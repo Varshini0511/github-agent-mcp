@@ -33,3 +33,20 @@ async def test_server_starts_from_environment_only_settings(monkeypatch):
         names = {t.name for t in await mcp.list_tools()}
     assert {"list_repo_files", "read_file", "search_code"} <= names
     assert set(WRITE_TOOLS) <= names
+
+
+async def test_server_starts_without_the_optional_rag_extra(monkeypatch, tmp_path):
+    # Shadow the RAG stack with a package that refuses to import, as if
+    # `pip install -e ".[rag]"` had never been run.
+    blocker = tmp_path / "langchain_community"
+    blocker.mkdir()
+    (blocker / "__init__.py").write_text("raise ImportError('rag extra not installed')\n")
+    monkeypatch.setenv("PYTHONPATH", str(tmp_path))
+    monkeypatch.setenv("GITHUB_TOKEN", "test-token-from-env")
+    monkeypatch.setenv("GROQ_API_KEY", "test-key-from-env")
+
+    async with mcp_server() as mcp:
+        tools = {t.name: t for t in await mcp.list_tools()}
+        assert "read_file" in tools
+        reply = await tools["search_code"].ainvoke({"repo": "o/r", "query": "x"})
+    assert "pip install" in str(reply) and "[rag]" in str(reply)
