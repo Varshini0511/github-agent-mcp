@@ -27,6 +27,27 @@ def is_rate_limited(exc: BaseException) -> bool:
     return any(m in s for m in RATE_LIMIT_MARKERS)
 
 
+# A DAILY quota (Gemini free tier: GenerateRequestsPerDayPerProjectPerModel;
+# Groq: "tokens per day (TPD)" / "requests per day (RPD)") is also a 429, but
+# waiting a minute cannot clear it.
+DAILY_QUOTA_MARKERS = (
+    "perday",
+    "per day",
+    "(tpd)",
+    "(rpd)",
+)
+
+
+def is_daily_quota(exc: BaseException) -> bool:
+    s = str(exc).lower()
+    return is_rate_limited(exc) and any(m in s for m in DAILY_QUOTA_MARKERS)
+
+
+def should_retry(exc: BaseException) -> bool:
+    """A rate limit that a short wait can clear (per-minute, not per-day)."""
+    return is_rate_limited(exc) and not is_daily_quota(exc)
+
+
 def retry_delay_seconds(exc: BaseException, default: float = 30.0, cap: float = 65.0) -> float:
     """Seconds to wait before retrying (provider hint + 1s cushion, capped)."""
     m = _RETRY_DELAY_RE.search(str(exc))
