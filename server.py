@@ -21,14 +21,33 @@ from devops_tools import (
     runs_overview,
 )
 from github_client import GitHubClient, GitHubError
-from rag import RepoIndex
 
 configure_logging()  # logs go to STDERR; STDOUT is the MCP protocol channel
 logger = logging.getLogger("github-agent.server")
 
 settings = get_settings()  # fails fast if required secrets are missing
 gh = GitHubClient()
-index = RepoIndex()
+
+_RAG_MISSING = (
+    "Error: code search is not installed. It needs the optional RAG "
+    'dependencies: pip install -e ".[rag]"'
+)
+_index = None
+
+
+def _repo_index():
+    """The RAG index, built on first use.
+
+    RAG is an optional extra, so importing it here (not at module load) keeps
+    the other tools available when it is not installed.
+    """
+    global _index
+    if _index is None:
+        from rag import RepoIndex
+
+        _index = RepoIndex()
+    return _index
+
 
 mcp = FastMCP("github-agent")
 
@@ -212,7 +231,9 @@ def index_repo(repo: str, ref: str = "") -> str:
     """
     logger.info("index_repo repo=%s ref=%r", repo, ref)
     try:
-        return index.index(repo, ref)
+        return _repo_index().index(repo, ref)
+    except ImportError:
+        return _RAG_MISSING
     except GitHubError as exc:
         return f"Error: {exc}"
     except Exception as exc:  # embedding / tar / disk problems
@@ -234,7 +255,9 @@ def search_code(repo: str, query: str) -> str:
     """
     logger.info("search_code repo=%s query=%r", repo, query)
     try:
-        hits = index.search(repo, query, k=6)
+        hits = _repo_index().search(repo, query, k=6)
+    except ImportError:
+        return _RAG_MISSING
     except FileNotFoundError as exc:
         return f"Error: {exc}"
     except Exception as exc:
